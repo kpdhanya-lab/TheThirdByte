@@ -1,9 +1,49 @@
 import { createClient } from '@supabase/supabase-js';
+import { ExtractedPrescription } from '../types/prescriptionExtraction';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://rjpigsvmxyvpjcbkxidt.supabase.co';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJqcGlnc3ZteHl2cGpjYmt4aWR0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzMTA2NjAsImV4cCI6MjEwNTg4NjY2MH0.NaQ4bTetBLcPs_KENgg5Qu0X-zgW0r9al2VWVaJGASg';
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+export interface DbPrescription {
+  id?: string;
+  created_at?: string;
+  patient_name?: string | null;
+  patient_address?: string | null;
+  patient_dob?: string | null;
+  patient_age?: string | null;
+  patient_weight?: string | null;
+  allergies?: any;
+  doctor_name?: string | null;
+  prescriber_name?: string | null;
+  doctor_address?: string | null;
+  prescriber_clinic?: string | null;
+  npi_number?: string | null;
+  dea_number?: string | null;
+  signature_present?: 'present' | 'absent' | 'unclear' | null;
+  date_of_issue?: string | null;
+  date_written?: string | null;
+  status?: string;
+  raw_extracted_json?: any;
+  hospital_code?: string | null;
+}
+
+export interface DbMedication {
+  id?: string;
+  prescription_id: string;
+  medication_name?: string | null;
+  strength?: string | null;
+  dosage_form?: string | null;
+  quantity_to_dispense?: string | null;
+  quantity?: string | null;
+  sig?: string | null;
+  refill_info?: string | null;
+  legibility?: 'legible' | 'partially_legible' | 'illegible' | null;
+  dosage_safety_flag?: 'none' | 'review_recommended' | 'not_determinable' | null;
+  dosage_safety_reason?: string | null;
+  created_at?: string;
+}
 
 export interface DbHospitalCode {
   id: string;
@@ -142,3 +182,81 @@ export async function registerPatientInDb(patient: DbPatient): Promise<{ success
     return { success: false, error: err?.message || 'Failed to register patient' };
   }
 }
+
+/**
+ * Save Groq-extracted prescription metadata and medication line items into Supabase.
+ * Returns the generated prescription UUID.
+ */
+export async function saveExtractedPrescriptionToSupabase(
+  extracted: ExtractedPrescription,
+  patient?: { name?: string; address?: string; age?: number; hospitalCode?: string }
+): Promise<{ success: boolean; prescriptionId?: string; error?: string }> {
+  try {
+    // 1. Insert header record into prescriptions table
+    const { data: prescriptionData, error: prescriptionError } = await supabase
+      .from('prescriptions')
+      .insert({
+        patient_name: extracted.patient_name || patient?.name || 'Walk-in Patient',
+        patient_address: patient?.address || null,
+        patient_dob: extracted.patient_dob || null,
+        patient_age: extracted.patient_age || (patient?.age ? `${patient.age} Yrs` : null),
+        patient_weight: extracted.patient_weight || null,
+        allergies: [],
+        doctor_name: extracted.prescriber_name || null,
+        prescriber_name: extracted.prescriber_name || null,
+        doctor_address: extracted.prescriber_clinic || null,
+        prescriber_clinic: extracted.prescriber_clinic || null,
+        signature_present: extracted.signature_present || 'unclear',
+        date_of_issue: extracted.date_written || null,
+        date_written: extracted.date_written || null,
+        hospital_code: patient?.hospitalCode || null,
+        status: 'pending_review',
+        raw_extracted_json: extracted,
+      })
+      .select('id')
+      .single();
+
+    if (prescriptionError || !prescriptionData) {
+      console.error('Failed to insert prescription into Supabase:', prescriptionError);
+      return { success: false, error: prescriptionError?.message || 'Failed to save prescription' };
+    }
+
+    const prescriptionId = prescriptionData.id;
+
+    // 2. Insert line items into medications table (linked by prescription_id)
+    if (extracted.medications && extracted.medications.length > 0) {
+      const medicationsToInsert = extracted.medications.map((m) => ({
+        prescription_id: prescriptionId,
+        medication_name: m.medication_name || '[Unreadable Name]',
+        strength: m.strength || null,
+        dosage_form: m.dosage_form || null,
+        quantity_to_dispense: m.quantity || null,
+        quantity: m.quantity || null,
+        sig: m.sig || null,
+        legibility: m.legibility || 'legible',
+        dosage_safety_flag: m.dosage_safety_flag || 'not_determinable',
+        dosage_safety_reason: m.dosage_safety_reason || null,
+      }));
+
+      const { error: medError } = await supabase
+        .from('medications')
+        .insert(medicationsToInsert);
+
+      if (medError) {
+        console.error('Failed to insert medications into Supabase:', medError);
+        return {
+          success: true,
+          prescriptionId,
+          error: 'Prescription saved, but some medications could not be stored: ' + medError.message,
+        };
+      }
+    }
+
+    console.log('[Supabase] Successfully saved prescription and medications:', prescriptionId);
+    return { success: true, prescriptionId };
+  } catch (err: any) {
+    console.error('Unexpected error saving prescription to Supabase:', err);
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+

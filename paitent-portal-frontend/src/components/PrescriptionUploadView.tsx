@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AttachedDoc, ViewMode } from '../types';
+import { AttachedDoc, ViewMode, PatientProfile } from '../types';
 import { ExtractedPrescription } from '../types/prescriptionExtraction';
 import {
   extractPrescriptionFromImage,
@@ -7,6 +7,7 @@ import {
   updateServerGroqApiKey,
   checkServerGroqKeyConfigured,
 } from '../utils/gemini';
+import { saveExtractedPrescriptionToSupabase } from '../utils/supabase';
 import {
   Clock,
   ShieldCheck,
@@ -33,6 +34,7 @@ interface PrescriptionUploadViewProps {
   onNavigate: (view: ViewMode) => void;
   onPreviewDoc: (doc: AttachedDoc) => void;
   onPrescriptionExtracted?: (extracted: ExtractedPrescription) => void;
+  patient?: PatientProfile;
 }
 
 export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
@@ -41,6 +43,7 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
   onNavigate,
   onPreviewDoc,
   onPrescriptionExtracted,
+  patient,
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -49,6 +52,7 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
     attachedDoc?.extractedPrescription || null
   );
   const [submitted, setSubmitted] = useState(false);
+  const [savingToDb, setSavingToDb] = useState(false);
   const [showKeyInput, setShowKeyInput] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [isKeyConfigured, setIsKeyConfigured] = useState<boolean | null>(null);
@@ -153,14 +157,38 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
     }
   };
 
-  const handleSubmit = () => {
-    if (extractedData && onPrescriptionExtracted) {
-      onPrescriptionExtracted(extractedData);
-    }
-    setSubmitted(true);
-    setTimeout(() => {
+  const handleSubmit = async () => {
+    if (!extractedData) {
       onNavigate('queue');
-    }, 700);
+      return;
+    }
+
+    setSavingToDb(true);
+    try {
+      const res = await saveExtractedPrescriptionToSupabase(extractedData, {
+        name: patient?.name,
+        address: patient?.address,
+        age: patient?.age,
+        hospitalCode: patient?.hospitalCode,
+      });
+
+      if (!res.success) {
+        console.warn('[Database Notice]:', res.error);
+      }
+
+      if (onPrescriptionExtracted) {
+        onPrescriptionExtracted(extractedData);
+      }
+      setSubmitted(true);
+      setTimeout(() => {
+        onNavigate('queue');
+      }, 700);
+    } catch (err: any) {
+      console.error('Error during submission:', err);
+      alert(`Prescription transmission error: ${err?.message || err}`);
+    } finally {
+      setSavingToDb(false);
+    }
   };
 
   // Helper badge color for signature
@@ -757,10 +785,15 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
         <button
           type="button"
           onClick={handleSubmit}
-          disabled={scanning}
+          disabled={scanning || savingToDb}
           className="w-full min-h-[52px] bg-[#164529] hover:bg-[#2f5d3f] text-[#ffffff] rounded-full px-6 py-3.5 flex items-center justify-center gap-2 shadow-md active:scale-[0.98] transition-all cursor-pointer font-serif font-semibold text-sm disabled:opacity-60"
         >
-          {submitted ? (
+          {savingToDb ? (
+            <div className="flex items-center gap-2">
+              <RefreshCw className="w-4 h-4 animate-spin text-[#ffffff]" />
+              <span>Saving Prescription to Dispensary Database...</span>
+            </div>
+          ) : submitted ? (
             <span>Prescription Transmitted! Redirecting to Queue...</span>
           ) : (
             <>

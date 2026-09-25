@@ -195,6 +195,7 @@ export default function App() {
             onNavigate={handleNavigate}
             onPreviewDoc={(doc) => setDocPreviewDoc(doc)}
             onPrescriptionExtracted={handlePrescriptionExtracted}
+            patient={patient}
           />
         )}
 

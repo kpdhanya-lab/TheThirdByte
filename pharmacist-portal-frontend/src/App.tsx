@@ -14,6 +14,11 @@ import { PrescriptionQueueView } from './components/PrescriptionQueueView';
 import { InteractionChecker } from './components/InteractionChecker';
 import { TerminalSecurityAudit } from './components/TerminalSecurityAudit';
 import { NewPrescriptionModal } from './components/NewPrescriptionModal';
+import {
+  fetchHospitalPrescriptions,
+  subscribeToHospitalPrescriptions,
+  updatePrescriptionStatusInSupabase,
+} from './utils/supabase';
 
 // Helper to parse route and query params from hash
 function parseHash(hash: string) {
@@ -58,6 +63,45 @@ export default function App() {
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, [isLoggedIn]);
+
+  // Fetch & Subscribe to Supabase prescriptions for current hospital
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadPrescriptions = async () => {
+      const dbList = await fetchHospitalPrescriptions(currentPharmacist.hospitalCode);
+      if (isMounted && dbList.length > 0) {
+        setPrescriptions((prev) => {
+          const dbRxNums = new Set(dbList.map((p) => p.rxNumber));
+          const remainingMocks = prev.filter((p) => !dbRxNums.has(p.rxNumber));
+          return [...dbList, ...remainingMocks];
+        });
+        setSelectedRxNumber((curr) => curr || dbList[0].rxNumber);
+      }
+    };
+
+    loadPrescriptions();
+
+    // Realtime subscription: new patient uploads automatically appear on pharmacist queue
+    const unsubscribe = subscribeToHospitalPrescriptions(
+      currentPharmacist.hospitalCode,
+      (newRx) => {
+        if (isMounted) {
+          setPrescriptions((prev) => [newRx, ...prev.filter((p) => p.rxNumber !== newRx.rxNumber)]);
+          setSelectedRxNumber(newRx.rxNumber);
+          try {
+            const audio = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3');
+            audio.play().catch(() => {});
+          } catch {}
+        }
+      }
+    );
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [currentPharmacist.hospitalCode, isLoggedIn]);
 
   // Navigate with browser history support
   const handleNavigate = useCallback(
@@ -140,6 +184,7 @@ export default function App() {
     setPrescriptions((prev) =>
       prev.map((p) => (p.rxNumber === updated.rxNumber ? updated : p))
     );
+    updatePrescriptionStatusInSupabase(updated.rxNumber, updated.status);
   };
 
   // Add intake prescription
