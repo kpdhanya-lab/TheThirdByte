@@ -105,6 +105,7 @@ export default function App() {
   };
 
   const handlePrescriptionExtracted = (extracted: ExtractedPrescription) => {
+    setAttachedDoc((prev) => (prev ? { ...prev, extractedPrescription: extracted } : null));
     if (extracted.medications && extracted.medications.length > 0) {
       setOrder((prev) => ({
         ...prev,
@@ -203,6 +204,7 @@ export default function App() {
           <QueueTrackerView
             patient={patient}
             order={order}
+            extractedPrescription={attachedDoc?.extractedPrescription}
             onNavigate={handleNavigate}
             onOpenPickupPass={() => setPickupPassOpen(true)}
             onOpenPharmacistChat={() => setPharmacistChatOpen(true)}

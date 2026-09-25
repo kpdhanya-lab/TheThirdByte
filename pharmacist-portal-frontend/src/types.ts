@@ -38,6 +38,29 @@ export interface Patient {
   copayAmount: number;
 }
 
+export interface ExtractedMedication {
+  medication_name: string | null;
+  strength: string | null;
+  dosage_form: string | null;
+  quantity: string | null;
+  sig: string | null;
+  legibility: 'legible' | 'partially_legible' | 'illegible';
+  dosage_safety_flag: 'none' | 'review_recommended' | 'not_determinable';
+  dosage_safety_reason: string | null;
+}
+
+export interface ExtractedPrescription {
+  patient_name: string | null;
+  patient_dob: string | null;
+  patient_age: string | null;
+  patient_weight: string | null;
+  prescriber_name: string | null;
+  prescriber_clinic: string | null;
+  date_written: string | null;
+  signature_present: 'present' | 'absent' | 'unclear';
+  medications: ExtractedMedication[];
+}
+
 export interface Prescription {
   rxNumber: string;
   patient: Patient;
@@ -77,6 +100,8 @@ export interface Prescription {
   }[];
   verifiedBy?: string;
   verifiedAt?: string;
+  vendingSlot?: string;
+  extractedData?: ExtractedPrescription;
 }
 
 export interface DispensaryTransaction {

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Prescription, Pharmacist } from '../types';
+import { resolveExtractedData } from '../utils/supabase';
 
 interface DispensingBayProps {
   prescriptions: Prescription[];
@@ -36,6 +37,7 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
   const [countedPills, setCountedPills] = useState<number>(0);
   const [isCountingActive, setIsCountingActive] = useState(false);
   const [pharmacistNotes, setPharmacistNotes] = useState('');
+  const [vendingSlot, setVendingSlot] = useState('');
   const [showLabelPreview, setShowLabelPreview] = useState(false);
   const [actionSuccessMessage, setActionSuccessMessage] = useState<string | null>(null);
 
@@ -48,6 +50,13 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
 
   const selectedRx =
     prescriptions.find((p) => p.rxNumber === selectedRxNumber) || prescriptions[0];
+
+  // Sync vendingSlot when selectedRx changes
+  useEffect(() => {
+    if (selectedRx) {
+      setVendingSlot(selectedRx.vendingSlot || '');
+    }
+  }, [selectedRx?.rxNumber]);
 
   // Filtering for queue pane
   const filteredList = prescriptions.filter((p) => {
@@ -102,13 +111,14 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
       status: 'Ready for Dispense',
       verifiedBy: currentPharmacist.name,
       verifiedAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      vendingSlot: vendingSlot.trim() || selectedRx.vendingSlot,
     };
     onUpdatePrescription(updated);
     if (onNavigate) {
-      onNavigate('approved-ready', selectedRx.rxNumber);
+      onNavigate('dispensing-monitor', selectedRx.rxNumber);
     } else {
       setActionSuccessMessage(
-        `Prescription ${selectedRx.rxNumber} verified and placed in Ready Bin.`
+        `Prescription ${selectedRx.rxNumber} verified${vendingSlot ? ` (Vending Slot: ${vendingSlot})` : ''} and placed in Ready Bin.`
       );
       setTimeout(() => setActionSuccessMessage(null), 3000);
     }
@@ -909,265 +919,294 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
         {/* Right 7 Columns: Clinical Verification & Dispensing Workbench */}
         {selectedRx ? (
           <div className="lg:col-span-7 flex flex-col gap-4">
-            {/* Patient Clinical Profile Card */}
-            <div className="bg-white rounded-2xl p-5 border border-[#E5DFCE] shadow-xs space-y-3">
-              <div className="flex items-start justify-between flex-wrap gap-2 pb-3 border-b border-[#E5DFCE]">
-                <div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[11px] font-mono uppercase bg-[#FAF7EE] px-2 py-0.5 rounded-lg text-[#1F2F4F]/70 border border-[#E5DFCE]">
-                      Patient ID: {selectedRx.patient.id}
-                    </span>
-                    <span className="text-[11px] text-[#1F2F4F]/70">
-                      DOB: {selectedRx.patient.dob} ({selectedRx.patient.age}y / {selectedRx.patient.gender})
-                    </span>
-                    <span className="text-[11px] text-[#1F2F4F]/70">
-                      Weight: {selectedRx.patient.weightKg} kg
-                    </span>
+            {/* Digitized Prescription Summary Card */}
+            {(() => {
+              const extractedSummary = resolveExtractedData(selectedRx);
+              return (
+                <div className="bg-white rounded-3xl p-5 sm:p-6 shadow-sm border border-[#164529]/15 space-y-5">
+                  {/* Card Header & Metadata */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#164529]/10 pb-4">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-full bg-[#164529]" />
+                        <h2 className="font-serif text-lg sm:text-xl font-bold text-[#164529]">
+                          Digitized Prescription Summary
+                        </h2>
+                      </div>
+                      <p className="text-xs text-[#555f56]">
+                        Extracted via Groq Vision (Qwen 3.8) structured output. Review the digitized items below.
+                      </p>
+                    </div>
+
+                    {/* Prescriber Signature Badge */}
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-semibold text-[#414942]">Prescriber Signature:</span>
+                      {extractedSummary.signature_present === 'present' ? (
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-[#e6f4ea] text-[#137333] border border-[#ceead6]">
+                          <span className="material-symbols-outlined text-[15px]">check_circle</span>
+                          <span>Signature Verified</span>
+                        </span>
+                      ) : extractedSummary.signature_present === 'absent' ? (
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-[#fce8e6] text-[#ba1a1a] border border-[#fad2cf]">
+                          <span className="material-symbols-outlined text-[15px]">cancel</span>
+                          <span>Signature Absent</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-[#fef7e0] text-[#b06000] border border-[#feefc3]">
+                          <span className="material-symbols-outlined text-[15px]">help_outline</span>
+                          <span>Signature Unclear</span>
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <h2 className="font-serif text-2xl font-bold text-[#2F5D3F] mt-1.5">
-                    {selectedRx.patient.name}
-                  </h2>
-                </div>
 
-                <div className="text-right text-xs">
-                  <span className="text-[#1F2F4F]/60 block">Prescribing Physician</span>
-                  <strong className="text-[#1F2F4F]">{selectedRx.prescriber.name}</strong>
-                  <span className="text-[10px] text-[#1F2F4F]/60 block font-mono">
-                    NPI: {selectedRx.prescriber.npi} • {selectedRx.prescriber.clinic}
-                  </span>
-                </div>
-              </div>
+                  {/* Header Metadata Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-[#f8f3e4] p-3.5 sm:p-4 rounded-2xl border border-[#164529]/10 text-xs">
+                    <div>
+                      <span className="text-[10px] font-bold text-[#717971] uppercase tracking-wider block">
+                        PATIENT
+                      </span>
+                      <span className="font-semibold text-[#1d1c13] text-sm">
+                        {extractedSummary.patient_name || selectedRx.patient.name}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-[#717971] uppercase tracking-wider block">
+                        DOB / AGE &amp; WEIGHT
+                      </span>
+                      <span className="font-semibold text-[#1d1c13]">
+                        {extractedSummary.patient_dob || extractedSummary.patient_age
+                          ? `${extractedSummary.patient_dob ? extractedSummary.patient_dob + ' ' : ''}${
+                              extractedSummary.patient_age ? `(${extractedSummary.patient_age})` : ''
+                            }`
+                          : selectedRx.patient.dob
+                          ? `${selectedRx.patient.dob} (${selectedRx.patient.age}y / ${selectedRx.patient.gender})`
+                          : 'Age unstated'}{' '}
+                        • {extractedSummary.patient_weight || `${selectedRx.patient.weightKg} kg`}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-[#717971] uppercase tracking-wider block">
+                        PRESCRIBER
+                      </span>
+                      <span className="font-semibold text-[#1d1c13] block">
+                        {extractedSummary.prescriber_name || selectedRx.prescriber.name}
+                      </span>
+                      {(extractedSummary.prescriber_clinic || selectedRx.prescriber.clinic) && (
+                        <span className="text-[10px] text-[#555f56] block truncate">
+                          {extractedSummary.prescriber_clinic || selectedRx.prescriber.clinic}
+                        </span>
+                      )}
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-bold text-[#717971] uppercase tracking-wider block">
+                        DATE WRITTEN
+                      </span>
+                      <span className="font-semibold text-[#1d1c13]">
+                        {extractedSummary.date_written || selectedRx.dateWritten || 'Undated'}
+                      </span>
+                    </div>
+                  </div>
 
-              {/* Patient Telemetry & Allergy Badges */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
-                <div className="p-3 bg-[#FAF7EE] rounded-xl border border-[#E5DFCE]">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#1F2F4F] block mb-1">
-                    Recorded Drug Allergies
-                  </span>
-                  <div className="flex flex-wrap gap-1.5">
-                    {selectedRx.patient.allergies.map((alg) => (
-                      <span
-                        key={alg}
-                        className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-md bg-[#E9B8C4] text-[#1F2F4F]"
+                  {/* Table Container */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <h3 className="font-serif text-sm font-bold text-[#164529] flex items-center gap-1.5">
+                        <span className="material-symbols-outlined text-[16px] text-[#164529]">link</span>
+                        <span>Medications &amp; Dosage Safety Triage</span>
+                      </h3>
+                      <span className="text-xs text-[#555f56] font-medium">
+                        {extractedSummary.medications.length}{' '}
+                        {extractedSummary.medications.length === 1 ? 'Medication' : 'Medications'} detected
+                      </span>
+                    </div>
+
+                    {extractedSummary.medications.length === 0 ? (
+                      <div className="p-4 rounded-xl bg-[#f8f3e4] text-center text-xs text-[#555f56]">
+                        No distinct medications were legible on this prescription. A pharmacist will review the raw scan manually.
+                      </div>
+                    ) : (
+                      <div className="overflow-x-auto rounded-xl border border-[#164529]/15">
+                        <table className="w-full text-left text-xs border-collapse">
+                          <thead>
+                            <tr className="bg-[#ede8d9] text-[#164529] font-serif border-b border-[#164529]/15">
+                              <th className="py-2.5 px-3 font-bold w-8 text-center">#</th>
+                              <th className="py-2.5 px-3 font-bold min-w-[140px]">Medication Name</th>
+                              <th className="py-2.5 px-3 font-bold min-w-[110px]">Strength &amp; Form</th>
+                              <th className="py-2.5 px-3 font-bold w-14 text-center">Qty</th>
+                              <th className="py-2.5 px-3 font-bold min-w-[140px]">Sig (Directions)</th>
+                              <th className="py-2.5 px-3 font-bold w-24 text-center">Legibility</th>
+                              <th className="py-2.5 px-3 font-bold min-w-[170px]">Dosage Safety Triage</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-[#164529]/10">
+                            {extractedSummary.medications.map((med, idx) => {
+                              const isFlagged = med.dosage_safety_flag === 'review_recommended';
+                              return (
+                                <tr
+                                  key={idx}
+                                  className={`hover:bg-[#fcfaf4] transition-colors ${
+                                    isFlagged ? 'bg-[#fff9f9]' : idx % 2 === 0 ? 'bg-[#ffffff]' : 'bg-[#faf7ee]'
+                                  }`}
+                                >
+                                  <td className="py-3 px-3 text-center text-[#717971] font-mono text-[11px]">
+                                    {idx + 1}
+                                  </td>
+                                  <td className="py-3 px-3">
+                                    <span
+                                      className={`font-semibold ${
+                                        med.legibility === 'illegible'
+                                          ? 'text-[#ba1a1a] italic'
+                                          : 'text-[#1d1c13]'
+                                      }`}
+                                    >
+                                      {med.medication_name || '[Unreadable Name]'}
+                                    </span>
+                                  </td>
+                                  <td className="py-3 px-3 text-[#414942]">
+                                    <div>{med.strength || '—'}</div>
+                                    {med.dosage_form && (
+                                      <div className="text-[10px] text-[#717971] uppercase font-mono">{med.dosage_form}</div>
+                                    )}
+                                  </td>
+                                  <td className="py-3 px-3 text-center text-[#414942] font-mono text-[11px]">
+                                    {med.quantity || '—'}
+                                  </td>
+                                  <td className="py-3 px-3 font-mono text-[11px] text-[#164529] font-medium bg-[#164529]/[0.02]">
+                                    {med.sig || '—'}
+                                  </td>
+                                  <td className="py-3 px-3 text-center">
+                                    {med.legibility === 'legible' ? (
+                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-[#e6f4ea] text-[#137333] border border-[#ceead6]">
+                                        Legible
+                                      </span>
+                                    ) : med.legibility === 'partially_legible' ? (
+                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-[#fef7e0] text-[#b06000] border border-[#feefc3]">
+                                        Partially Legible
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-[#fce8e6] text-[#ba1a1a] border border-[#fad2cf]">
+                                        Illegible
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="py-3 px-3">
+                                    {med.dosage_safety_flag === 'review_recommended' ? (
+                                      <div className="space-y-0.5">
+                                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-[#fce8e6] text-[#ba1a1a] border border-[#fad2cf]">
+                                          <span className="material-symbols-outlined text-[13px]">warning</span>
+                                          <span>Review Recommended</span>
+                                        </span>
+                                        {med.dosage_safety_reason && (
+                                          <p className="text-[10px] text-[#ba1a1a] italic leading-tight">
+                                            {med.dosage_safety_reason}
+                                          </p>
+                                        )}
+                                      </div>
+                                    ) : med.dosage_safety_flag === 'not_determinable' ? (
+                                      <div className="space-y-0.5">
+                                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-[#fef7e0] text-[#b06000] border border-[#feefc3]">
+                                          <span className="material-symbols-outlined text-[13px]">help_outline</span>
+                                          <span>Not Determinable</span>
+                                        </span>
+                                        {med.dosage_safety_reason && (
+                                          <p className="text-[10px] text-[#555f56] italic leading-tight">
+                                            {med.dosage_safety_reason}
+                                          </p>
+                                        )}
+                                      </div>
+                                    ) : (
+                                      <div className="space-y-0.5">
+                                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-[#e6f4ea] text-[#137333] border border-[#ceead6]">
+                                          <span className="material-symbols-outlined text-[13px]">check_circle</span>
+                                          <span>Normal Range</span>
+                                        </span>
+                                        {med.dosage_safety_reason && (
+                                          <p className="text-[10px] text-[#555f56] italic leading-tight">
+                                            {med.dosage_safety_reason}
+                                          </p>
+                                        )}
+                                      </div>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Clinical Safety Notice Banner */}
+                  <div className="p-3 bg-[#ede8d9]/50 rounded-xl border border-[#164529]/10 flex items-start gap-2.5 text-[11px] text-[#555f56]">
+                    <span className="material-symbols-outlined text-[18px] text-[#164529] shrink-0 mt-0.5">
+                      verified_user
+                    </span>
+                    <p>
+                      <strong className="text-[#164529]">Clinical Safety Notice:</strong> This dosage safety
+                      comparison is an automated triage aid comparing strength/quantity against stated patient
+                      weight and age. It is NOT clinical advice. A licensed pharmacist verifies all items prior to
+                      dispensing.
+                    </p>
+                  </div>
+
+                  {/* Pharmacist Notes (Optional) */}
+                  <div className="pt-1">
+                    <label className="text-[11px] font-semibold text-[#1F2F4F]/80 block mb-1">
+                      Pharmacist Verification &amp; Clinical Notes:
+                    </label>
+                    <textarea
+                      value={pharmacistNotes}
+                      onChange={(e) => setPharmacistNotes(e.target.value)}
+                      placeholder="Record counseling notes, clinical interaction override rationale, or prescriber consultations..."
+                      rows={2}
+                      className="w-full p-2.5 text-xs bg-[#FAF7EE] border border-[#164529]/15 rounded-xl focus:bg-white focus:outline-none focus:border-[#2F5D3F] text-[#1F2F4F]"
+                    />
+                  </div>
+
+                  {/* Vending Machine Slot Number */}
+                  <div className="pt-1">
+                    <label className="text-[11px] font-semibold text-[#1F2F4F]/80 block mb-1 flex items-center gap-1.5">
+                      <span className="material-symbols-outlined text-[15px] text-[#2F5D3F]">grid_view</span>
+                      <span>Vending Machine Slot Number:</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={vendingSlot}
+                      onChange={(e) => setVendingSlot(e.target.value)}
+                      placeholder="Enter vending machine slot number (e.g. Slot B-14, Bay 03)..."
+                      className="w-full h-10 px-3.5 text-xs bg-[#FAF7EE] border border-[#164529]/15 rounded-xl focus:bg-white focus:outline-none focus:border-[#2F5D3F] text-[#1F2F4F] font-mono font-medium placeholder:font-sans placeholder:text-[#1F2F4F]/50"
+                    />
+                  </div>
+
+                  {/* Action Buttons for Review Mode (Retain Print Label and Approve Commands) */}
+                  {isReviewMode && (
+                    <div className="pt-3 border-t border-[#164529]/10 flex flex-wrap items-center justify-between gap-3">
+                      <button
+                        type="button"
+                        onClick={() => setShowLabelPreview(true)}
+                        className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-[#FAF7EE] hover:bg-[#E5DFCE] text-[#1F2F4F] border border-[#E5DFCE] text-xs font-semibold cursor-pointer transition-colors shadow-xs"
                       >
-                        <span className="material-symbols-outlined text-[13px]">warning</span>
-                        {alg}
-                      </span>
-                    ))}
-                  </div>
-                </div>
+                        <span className="material-symbols-outlined text-[17px]">print</span>
+                        <span>Print Label</span>
+                      </button>
 
-                <div className="p-3 bg-[#FAF7EE] rounded-xl border border-[#E5DFCE]">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#1F2F4F] block mb-1">
-                    Current Active Medications
-                  </span>
-                  <div className="flex flex-wrap gap-1.5">
-                    {selectedRx.patient.currentMedications.map((med) => (
-                      <span
-                        key={med}
-                        className="text-[11px] px-2 py-0.5 rounded-md bg-white text-[#1F2F4F] border border-[#E5DFCE]"
-                      >
-                        {med}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Prescribed Drug & Directions (SIG) Box */}
-            <div className="bg-white rounded-2xl p-5 border border-[#E5DFCE] shadow-xs space-y-4">
-              <div className="flex items-start justify-between flex-wrap gap-2">
-                <div>
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#2F5D3F] bg-[#2F5D3F]/10 px-2.5 py-0.5 rounded-full">
-                    {selectedRx.medication.schedule !== 'None'
-                      ? selectedRx.medication.schedule
-                      : 'Legend Drug (Rx Only)'}
-                  </span>
-                  <h3 className="font-serif text-xl sm:text-2xl font-bold text-[#2F5D3F] mt-1.5">
-                    {selectedRx.medication.name}{' '}
-                    <span className="font-sans text-base font-normal text-[#1F2F4F]/60">
-                      ({selectedRx.medication.genericName})
-                    </span>
-                  </h3>
-                  <div className="flex items-center gap-3 text-xs text-[#1F2F4F]/70 mt-1 font-mono flex-wrap">
-                    <span>NDC: {selectedRx.medication.ndc}</span>
-                    <span>•</span>
-                    <span>Strength: {selectedRx.medication.strength}</span>
-                    <span>•</span>
-                    <span>Form: {selectedRx.medication.dosageForm}</span>
-                  </div>
-                </div>
-
-                <div className="text-right">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#1F2F4F]/60 block">
-                    Dispense Quantity
-                  </span>
-                  <span className="font-mono text-2xl font-bold text-[#2F5D3F]">
-                    {selectedRx.quantity}
-                  </span>
-                  <span className="text-[11px] text-[#1F2F4F]/60 block font-mono">
-                    ({selectedRx.daysSupply} Days Supply)
-                  </span>
-                </div>
-              </div>
-
-              {/* SIG Highlight Box */}
-              <div className="p-4 bg-[#FAF7EE] rounded-xl border-l-4 border-[#2F5D3F] text-[#1F2F4F]">
-                <span className="text-[10px] font-mono uppercase tracking-wider text-[#2F5D3F] font-bold block mb-1">
-                  SIG Directions for Use:
-                </span>
-                <p className="font-serif text-base sm:text-lg font-medium italic">
-                  "{selectedRx.sig}"
-                </p>
-              </div>
-
-              {/* Auxiliary Warning Flags */}
-              <div>
-                <span className="text-[10px] font-bold uppercase tracking-wider text-[#1F2F4F]/70 block mb-2">
-                  Auxiliary Label Warnings
-                </span>
-                <div className="flex flex-wrap gap-2">
-                  {selectedRx.auxiliaryWarnings.map((warn, i) => (
-                    <span
-                      key={i}
-                      className="text-xs px-2.5 py-1 rounded-xl bg-[#FAF7EE] text-[#1F2F4F] border border-[#E5DFCE] font-medium flex items-center gap-1.5"
-                    >
-                      <span className="material-symbols-outlined text-[15px] text-[#2F5D3F]">label_important</span>
-                      {warn}
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              {/* Safety Alerts / Contraindication Box */}
-              {(selectedRx.safetyAlerts?.length || 0) > 0 && (
-                <div className="space-y-2 pt-2 border-t border-[#E5DFCE]">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#1F2F4F]/70 block">
-                    Clinical Decision Alerts
-                  </span>
-                  {selectedRx.safetyAlerts?.map((alert, idx) => (
-                    <div
-                      key={idx}
-                      className={`p-3 rounded-xl border flex items-start gap-2.5 text-xs ${
-                        alert.severity === 'critical'
-                          ? 'bg-[#E9B8C4]/40 border-[#E9B8C4] text-[#1F2F4F]'
-                          : alert.severity === 'warning'
-                          ? 'bg-[#FAF1E4] border-[#C47D2B]/40 text-[#C47D2B]'
-                          : 'bg-[#FAF7EE] border-[#2F5D3F]/30 text-[#2F5D3F]'
-                      }`}
-                    >
-                      <span className="material-symbols-outlined text-[18px] shrink-0 mt-0.5">
-                        {alert.severity === 'critical'
-                          ? 'gpp_bad'
-                          : alert.severity === 'warning'
-                          ? 'warning'
-                          : 'info'}
-                      </span>
-                      <div>
-                        <strong className="block font-semibold">{alert.message}</strong>
-                        <span className="text-[11px] opacity-90">{alert.details}</span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleMarkReady}
+                          className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-[#2F5D3F] hover:bg-[#234730] text-white text-xs font-bold uppercase tracking-wider shadow-xs transition-all cursor-pointer"
+                        >
+                          <span className="material-symbols-outlined text-[18px]">verified</span>
+                          <span>APPROVE</span>
+                        </button>
                       </div>
                     </div>
-                  ))}
+                  )}
                 </div>
-              )}
-
-              {/* Clinical Verification Checklist (Screen 4 requirement) */}
-              <div className="p-4 bg-[#FAF7EE] rounded-xl border border-[#E5DFCE] space-y-2.5">
-                <div className="flex items-center justify-between pb-1.5 border-b border-[#E5DFCE]">
-                  <span className="text-xs font-bold text-[#2F5D3F] flex items-center gap-1.5 uppercase tracking-wider">
-                    <span className="material-symbols-outlined text-[16px]">fact_check</span>
-                    <span>Clinical Verification Checklist</span>
-                  </span>
-                  <span className="text-[10px] font-mono text-[#1F2F4F]/60">
-                    5 of 5 Checks Satisfied
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-                  <label className="flex items-center gap-2 text-[#1F2F4F] cursor-pointer">
-                    <input
-                      type="checkbox"
-                      defaultChecked
-                      className="rounded text-[#2F5D3F] focus:ring-[#2F5D3F] w-3.5 h-3.5 accent-[#2F5D3F]"
-                    />
-                    <span>Patient Identity & Demographics Confirmed</span>
-                  </label>
-                  <label className="flex items-center gap-2 text-[#1F2F4F] cursor-pointer">
-                    <input
-                      type="checkbox"
-                      defaultChecked
-                      className="rounded text-[#2F5D3F] focus:ring-[#2F5D3F] w-3.5 h-3.5 accent-[#2F5D3F]"
-                    />
-                    <span>Correct Medicine, Strength & Form</span>
-                  </label>
-                  <label className="flex items-center gap-2 text-[#1F2F4F] cursor-pointer">
-                    <input
-                      type="checkbox"
-                      defaultChecked
-                      className="rounded text-[#2F5D3F] focus:ring-[#2F5D3F] w-3.5 h-3.5 accent-[#2F5D3F]"
-                    />
-                    <span>Appropriate Directions & Dosing Schedule</span>
-                  </label>
-                  <label className="flex items-center gap-2 text-[#1F2F4F] cursor-pointer">
-                    <input
-                      type="checkbox"
-                      defaultChecked
-                      className="rounded text-[#2F5D3F] focus:ring-[#2F5D3F] w-3.5 h-3.5 accent-[#2F5D3F]"
-                    />
-                    <span>Drug-Allergy & Interaction Check Cleared</span>
-                  </label>
-                  <label className="flex items-center gap-2 text-[#1F2F4F] cursor-pointer sm:col-span-2">
-                    <input
-                      type="checkbox"
-                      defaultChecked
-                      className="rounded text-[#2F5D3F] focus:ring-[#2F5D3F] w-3.5 h-3.5 accent-[#2F5D3F]"
-                    />
-                    <span>EPCS Electronic Signature & Refill Authorization Verified</span>
-                  </label>
-                </div>
-              </div>
-
-              {/* Pharmacist Clinical Sign-off Notes */}
-              <div className="pt-2">
-                <label className="text-xs font-semibold text-[#1F2F4F] block mb-1">
-                  Pharmacist Verification & Clinical Overrides Notes:
-                </label>
-                <textarea
-                  value={pharmacistNotes}
-                  onChange={(e) => setPharmacistNotes(e.target.value)}
-                  placeholder="Record counseling notes, clinical interaction override rationale, or prescriber consultations..."
-                  rows={2}
-                  className="w-full p-2.5 text-xs bg-[#FAF7EE] border border-[#E5DFCE] rounded-xl focus:bg-white focus:outline-none focus:border-[#2F5D3F] text-[#1F2F4F]"
-                />
-              </div>
-
-              {/* Action Buttons for Review Mode */}
-              {isReviewMode && (
-                <div className="pt-3 border-t border-[#E5DFCE] flex flex-wrap items-center justify-between gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setShowLabelPreview(true)}
-                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#FAF7EE] hover:bg-[#E5DFCE] text-[#1F2F4F] border border-[#E5DFCE] text-xs font-semibold cursor-pointer"
-                  >
-                    <span className="material-symbols-outlined text-[17px]">print</span>
-                    <span>Preview Label</span>
-                  </button>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={handleMarkReady}
-                      className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-[#2F5D3F] hover:bg-[#234730] text-white text-xs font-bold uppercase tracking-wider shadow-xs transition-all cursor-pointer"
-                    >
-                      <span className="material-symbols-outlined text-[18px]">verified</span>
-                      <span>APPROVE</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
+              );
+            })()}
 
             {/* Station Physical Dispensing Verification (Tray & Sensor) - Shown in Dispensing Mode or Full Mode */}
             {(!isReviewMode || isDispensingMode) && (

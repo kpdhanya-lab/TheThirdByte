@@ -1,5 +1,12 @@
 import { createClient } from '@supabase/supabase-js';
-import { Pharmacist, Prescription, PriorityLevel, PrescriptionStatus } from '../types';
+import {
+  Pharmacist,
+  Prescription,
+  PriorityLevel,
+  PrescriptionStatus,
+  ExtractedPrescription,
+  ExtractedMedication,
+} from '../types';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://rjpigsvmxyvpjcbkxidt.supabase.co';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJqcGlnc3ZteHl2cGpjYmt4aWR0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzMTA2NjAsImV4cCI6MjEwNTg4NjY2MH0.NaQ4bTetBLcPs_KENgg5Qu0X-zgW0r9al2VWVaJGASg';
@@ -257,9 +264,59 @@ export async function fetchHospitalPrescriptions(hospitalCode?: string): Promise
       const strength = meds.map((m) => m.strength).filter(Boolean).join(', ') || primaryMed.strength || 'As directed';
       const dosageForm = primaryMed.dosage_form || 'Tablet / Capsule';
       const sig = meds.map((m) => `${m.medication_name ? m.medication_name + ': ' : ''}${m.sig || 'As directed'}`).join(' | ');
-
       const qtyNumber = parseInt(String(primaryMed.quantity_to_dispense || primaryMed.quantity || '').replace(/\D/g, ''), 10) || 30;
       const patientAge = parseInt(String(row.patient_age || '').replace(/\D/g, ''), 10) || 45;
+
+      let extractedData: ExtractedPrescription | null = null;
+      if (row.raw_extracted_json) {
+        try {
+          const parsed =
+            typeof row.raw_extracted_json === 'string'
+              ? JSON.parse(row.raw_extracted_json)
+              : row.raw_extracted_json;
+          if (parsed && Array.isArray(parsed.medications) && parsed.medications.length > 0) {
+            extractedData = parsed;
+          }
+        } catch (e) {
+          console.warn('Error parsing raw_extracted_json:', e);
+        }
+      }
+
+      if (!extractedData) {
+        extractedData = {
+          patient_name: row.patient_name || null,
+          patient_dob: row.patient_dob || null,
+          patient_age: row.patient_age || (patientAge ? `${patientAge} Yrs` : null),
+          patient_weight: row.patient_weight ? String(row.patient_weight) : null,
+          prescriber_name: row.doctor_name || row.prescriber_name || null,
+          prescriber_clinic: row.doctor_address || row.prescriber_clinic || null,
+          date_written: row.date_of_issue || row.date_written || null,
+          signature_present: (row.signature_present as any) || 'present',
+          medications: meds.length > 0
+            ? meds.map((m) => ({
+                medication_name: m.medication_name || null,
+                strength: m.strength || null,
+                dosage_form: m.dosage_form || null,
+                quantity: m.quantity || m.quantity_to_dispense || null,
+                sig: m.sig || null,
+                legibility: m.legibility || 'legible',
+                dosage_safety_flag: m.dosage_safety_flag || 'none',
+                dosage_safety_reason: m.dosage_safety_reason || null,
+              }))
+            : [
+                {
+                  medication_name: medName,
+                  strength,
+                  dosage_form: dosageForm,
+                  quantity: String(qtyNumber),
+                  sig: sig || 'Take as directed',
+                  legibility: 'legible',
+                  dosage_safety_flag: hasReviewFlag ? 'review_recommended' : 'none',
+                  dosage_safety_reason: `patient is ${patientAge} yo adult, ${row.patient_weight || '70 kg'}; standard adult dosages`,
+                },
+              ],
+        };
+      }
 
       mapped.push({
         rxNumber: rxNum,
@@ -307,6 +364,7 @@ export async function fetchHospitalPrescriptions(hospitalCode?: string): Promise
           ? ['Dosage Alert: Review recommended based on stated weight/age', 'Pharmacist consultation required']
           : ['Take with water after food', 'Keep out of reach of children'],
         safetyAlerts,
+        extractedData,
       });
     }
 
@@ -315,6 +373,96 @@ export async function fetchHospitalPrescriptions(hospitalCode?: string): Promise
     console.error('fetchHospitalPrescriptions error:', err);
     return [];
   }
+}
+
+/**
+ * Resolves a complete ExtractedPrescription from a Prescription, fallbacking to decomposed multi-medications if needed.
+ */
+export function resolveExtractedData(rx: Prescription): ExtractedPrescription {
+  // If valid multi-medication extractedData exists, return it
+  if (
+    rx.extractedData &&
+    Array.isArray(rx.extractedData.medications) &&
+    rx.extractedData.medications.length > 1
+  ) {
+    return rx.extractedData;
+  }
+
+  // If extractedData has 1 medication that DOES NOT contain '+', return it
+  if (
+    rx.extractedData &&
+    Array.isArray(rx.extractedData.medications) &&
+    rx.extractedData.medications.length === 1 &&
+    !rx.extractedData.medications[0].medication_name?.includes(' + ')
+  ) {
+    return rx.extractedData;
+  }
+
+  // Otherwise decompose composite medication names (e.g. "VERTIN + STEMETIL" or from currentMedications)
+  const compositeName = rx.medication.name || '';
+  const medNames = compositeName.includes(' + ')
+    ? compositeName.split(' + ').map((s) => s.trim()).filter(Boolean)
+    : (rx.patient.currentMedications && rx.patient.currentMedications.length > 1)
+    ? rx.patient.currentMedications
+    : [compositeName || 'Prescribed Medication'];
+
+  const sigParts = (rx.sig || '').split(' | ').map((s) => s.trim());
+  const strengthParts = (rx.medication.strength || '').split(',').map((s) => s.trim());
+
+  const isFlagged = rx.safetyAlerts?.some((a) => a.severity === 'critical');
+  const alertDetail = rx.safetyAlerts?.[0]?.details;
+
+  const resolvedMeds: ExtractedMedication[] = medNames.map((name, idx) => {
+    // Find matching sig if prefixed e.g. "VERTIN: 1 - 0 - 1"
+    const matchedSigPart = sigParts.find((s) =>
+      s.toLowerCase().startsWith(name.toLowerCase() + ':')
+    );
+    const cleanSig = matchedSigPart
+      ? matchedSigPart.replace(new RegExp(`^${name}:?\\s*`, 'i'), '').trim()
+      : sigParts[idx] || rx.sig || 'Take as directed';
+
+    const matchedStrength = strengthParts[idx] && strengthParts[idx] !== 'null'
+      ? strengthParts[idx]
+      : rx.medication.strength && !rx.medication.strength.includes(',')
+      ? rx.medication.strength
+      : null;
+
+    const medAlert = rx.safetyAlerts?.find((a) =>
+      a.message?.toLowerCase().includes(name.toLowerCase())
+    );
+
+    return {
+      medication_name: name,
+      strength: matchedStrength,
+      dosage_form: rx.medication.dosageForm || 'TAB',
+      quantity: rx.quantity ? String(rx.quantity) : null,
+      sig: cleanSig.replace(/[\u0001\u0002]/g, '').trim(),
+      legibility: 'legible',
+      dosage_safety_flag: medAlert
+        ? medAlert.severity === 'critical'
+          ? 'review_recommended'
+          : 'none'
+        : isFlagged
+        ? 'review_recommended'
+        : 'none',
+      dosage_safety_reason:
+        medAlert?.details ||
+        alertDetail ||
+        `patient is ${rx.patient.age} yo adult, ${rx.patient.gender === 'M' ? 'male' : 'female'}, ${rx.patient.weightKg} kg; standard adult dosages`,
+    };
+  });
+
+  return {
+    patient_name: rx.patient.name,
+    patient_dob: rx.patient.dob,
+    patient_age: rx.patient.age ? `${rx.patient.age}Y` : null,
+    patient_weight: rx.patient.weightKg ? `${rx.patient.weightKg} kg` : null,
+    prescriber_name: rx.prescriber.name,
+    prescriber_clinic: rx.prescriber.clinic,
+    date_written: rx.dateWritten,
+    signature_present: rx.extractedData?.signature_present || 'present',
+    medications: resolvedMeds,
+  };
 }
 
 /**
