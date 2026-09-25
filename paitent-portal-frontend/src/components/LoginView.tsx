@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { PatientProfile, ViewMode } from '../types';
-import { ArrowRight, Phone, CheckCircle } from 'lucide-react';
+import { ArrowRight, Phone, CheckCircle, AlertCircle } from 'lucide-react';
 import {
   HospitalCodeInput,
   findHospitalByCode,
   HospitalEntry,
 } from './HospitalCodeInput';
+import { findPatientByPhone } from '../utils/supabase';
 
 interface LoginViewProps {
   onNavigate: (view: ViewMode) => void;
@@ -28,6 +29,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [phoneError, setPhoneError] = useState('');
   const [hospitalCodeInput, setHospitalCodeInput] = useState(patient.hospitalCode || '');
   const [hospitalCodeError, setHospitalCodeError] = useState('');
+  const [generalError, setGeneralError] = useState('');
 
   const handleHospitalCodeChange = (code: string, matched: HospitalEntry | undefined) => {
     setHospitalCodeInput(code);
@@ -57,11 +59,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setGeneralError('');
     let hasError = false;
 
-    if (!phone || phone.replace(/\D/g, '').length < 10) {
+    const rawDigits = phone.replace(/\D/g, '');
+    if (!phone || rawDigits.length < 10) {
       setPhoneError('Please enter a valid 10-digit mobile number');
       hasError = true;
     } else {
@@ -70,7 +74,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
     const matched = findHospitalByCode(hospitalCodeInput);
     if (!matched) {
-      setHospitalCodeError('Invalid hospital code. Please check the code with your hospital.');
+      setHospitalCodeError('Invalid hospital code. Accepted codes: 560017, 560076, 560034');
       hasError = true;
     } else {
       setHospitalCodeError('');
@@ -81,10 +85,39 @@ export const LoginView: React.FC<LoginViewProps> = ({
     }
 
     setLoading(true);
-    setTimeout(() => {
+    try {
+      // Check database to ensure ONLY registered mobile numbers can login
+      const registeredPatient = await findPatientByPhone(phone);
+
+      if (!registeredPatient) {
+        setPhoneError('This mobile number is not registered. Please register first to access the portal.');
+        setLoading(false);
+        return;
+      }
+
+      // Populate patient state with registered details
+      setPatient((prev) => ({
+        ...prev,
+        name: registeredPatient.full_name,
+        phone: registeredPatient.phone,
+        age: registeredPatient.age,
+        gender: registeredPatient.gender,
+        address: registeredPatient.address,
+        language: registeredPatient.primary_language || 'English',
+        email: registeredPatient.email || '',
+        emergencyContact: registeredPatient.emergency_contact || '',
+        hospitalCode: matched!.code,
+        hospitalName: matched!.name,
+        hospitalArea: matched!.area,
+        verified: false,
+      }));
+
+      onSendOtp(registeredPatient.phone);
+    } catch (err: any) {
+      setGeneralError(err?.message || 'Connection error. Please try again.');
+    } finally {
       setLoading(false);
-      onSendOtp(phone);
-    }, 600);
+    }
   };
 
   return (
@@ -117,13 +150,20 @@ export const LoginView: React.FC<LoginViewProps> = ({
             Enter your registered mobile number to receive a secure instant one-time passcode.
           </p>
 
-          <form onSubmit={handleSubmit} className="mt-8 space-y-5">
+          {generalError && (
+            <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-xl flex items-center gap-2 text-xs text-red-700">
+              <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+              <span>{generalError}</span>
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit} className="mt-6 space-y-5">
             <div>
               <label
                 htmlFor="patient-phone"
                 className="block text-xs font-bold text-[#164529] uppercase tracking-wider mb-2"
               >
-                Mobile Contact Number
+                Mobile Contact Number <span className="text-[#7a545e]">*</span>
               </label>
               <div className="relative flex items-center rounded-2xl bg-[#f8f3e4] border border-[#164529]/20 focus-within:border-[#164529] focus-within:ring-2 focus-within:ring-[#164529]/20 transition-all p-1.5">
                 {/* Country Prefix */}
@@ -152,10 +192,23 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 </div>
               </div>
 
-              {phoneError && <p className="mt-1.5 text-xs text-[#ba1a1a] font-semibold">{phoneError}</p>}
+              {phoneError && (
+                <div className="mt-2 text-xs text-[#ba1a1a] font-semibold flex items-center justify-between">
+                  <span>{phoneError}</span>
+                  {phoneError.includes('not registered') && (
+                    <button
+                      type="button"
+                      onClick={() => onNavigate('register')}
+                      className="underline text-[#164529] font-bold hover:opacity-80 ml-2"
+                    >
+                      Register Now
+                    </button>
+                  )}
+                </div>
+              )}
 
               <div className="flex justify-between items-center mt-2 px-1 text-xs">
-                <span className="text-[#717971]">Format: 10-digit mobile line</span>
+                <span className="text-[#717971]">Registered 10-digit mobile line</span>
                 <span className="text-[#7a545e] font-semibold">SMS Dispatch Active</span>
               </div>
             </div>
@@ -178,7 +231,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
               {loading ? (
                 <span className="flex items-center gap-2">
                   <span className="w-4 h-4 border-2 border-[#ffffff] border-t-transparent rounded-full animate-spin"></span>
-                  Transmitting OTP...
+                  Checking Patient Record...
                 </span>
               ) : (
                 <>

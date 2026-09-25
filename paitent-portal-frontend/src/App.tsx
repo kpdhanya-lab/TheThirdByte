@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ViewMode, PatientProfile, PrescriptionOrder, AttachedDoc } from './types';
 import { DEFAULT_PATIENT, SAMPLE_ORDER } from './data';
 import { playDispensaryChime } from './utils/audio';
@@ -11,12 +11,46 @@ import { DashboardView } from './components/DashboardView';
 import { PrescriptionUploadView } from './components/PrescriptionUploadView';
 import { QueueTrackerView } from './components/QueueTrackerView';
 import { Modals } from './components/Modals';
+import { findPatientByPhone, fetchActiveHospitalCodes } from './utils/supabase';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<ViewMode>('home');
-  const [patient, setPatient] = useState<PatientProfile>(DEFAULT_PATIENT);
+  const [patient, setPatient] = useState<PatientProfile>({
+    ...DEFAULT_PATIENT,
+    verified: false,
+  });
   const [order, setOrder] = useState<PrescriptionOrder>(SAMPLE_ORDER);
-  const [phone, setPhone] = useState('+91 98765 43210');
+  const [phone, setPhone] = useState('');
+
+  // Check saved session on mount
+  useEffect(() => {
+    const savedPhone = localStorage.getItem('active_patient_phone');
+    if (savedPhone) {
+      findPatientByPhone(savedPhone).then(async (dbPatient) => {
+        if (dbPatient) {
+          const codes = await fetchActiveHospitalCodes();
+          const match = codes.find((c) => c.code === dbPatient.hospital_code);
+
+          setPatient((prev) => ({
+            ...prev,
+            name: dbPatient.full_name,
+            phone: dbPatient.phone,
+            age: dbPatient.age,
+            language: dbPatient.primary_language || 'English',
+            gender: dbPatient.gender,
+            address: dbPatient.address,
+            email: dbPatient.email || '',
+            emergencyContact: dbPatient.emergency_contact || '',
+            hospitalCode: dbPatient.hospital_code || '',
+            hospitalName: match?.name || (dbPatient.hospital_code ? `Hospital (${dbPatient.hospital_code})` : ''),
+            hospitalArea: match?.area || '',
+            verified: true,
+          }));
+          setPhone(dbPatient.phone);
+        }
+      });
+    }
+  }, []);
 
   // Attached document for prescription upload & AI extraction
   const [attachedDoc, setAttachedDoc] = useState<AttachedDoc | null>({
@@ -49,11 +83,25 @@ export default function App() {
 
   const handleVerifiedSuccess = () => {
     handlePlayChime();
-    setPatient((prev) => ({ ...prev, phone }));
+    setPatient((prev) => ({ ...prev, phone: phone || prev.phone, verified: true }));
+    if (phone) {
+      localStorage.setItem('active_patient_phone', phone);
+    }
   };
 
   const handleRegisteredSuccess = () => {
     handlePlayChime();
+    setPatient((prev) => ({ ...prev, verified: true }));
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('active_patient_phone');
+    setPatient({
+      ...DEFAULT_PATIENT,
+      verified: false,
+    });
+    setPhone('');
+    handleNavigate('home');
   };
 
   return (
@@ -64,8 +112,11 @@ export default function App() {
         onNavigate={handleNavigate}
         patientName={patient.name}
         tokenNumber={patient.tokenNumber}
+        hospitalName={patient.hospitalName}
         onOpenNotifications={() => setCounterDirectionsOpen(true)}
         notificationCount={1}
+        onLogout={handleLogout}
+        isLoggedIn={patient.verified}
       />
 
       {/* 3. Main Scrollable Content Canvas */}

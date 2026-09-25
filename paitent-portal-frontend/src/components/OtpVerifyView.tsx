@@ -53,6 +53,9 @@ export const OtpVerifyView: React.FC<OtpVerifyViewProps> = ({
     setTimeout(() => {
       setLoading(false);
       setVerified(true);
+      if (phone) {
+        localStorage.setItem('active_patient_phone', phone);
+      }
       setTimeout(() => {
         onVerifiedSuccess();
         onNavigate('dashboard');

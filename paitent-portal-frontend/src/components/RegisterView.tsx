@@ -7,16 +7,15 @@ import {
   Phone,
   Home,
   ShieldCheck,
-  Check,
+  AlertCircle,
 } from 'lucide-react';
 import {
   HospitalCodeInput,
-  VALID_HOSPITAL_CODES,
   findHospitalByCode,
   HospitalEntry,
 } from './HospitalCodeInput';
+import { registerPatientInDb } from '../utils/supabase';
 
-export { VALID_HOSPITAL_CODES };
 export type { HospitalEntry };
 
 interface RegisterViewProps {
@@ -36,6 +35,7 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
   const [loading, setLoading] = useState(false);
   const [hospitalCodeInput, setHospitalCodeInput] = useState(patient.hospitalCode || '');
   const [hospitalCodeError, setHospitalCodeError] = useState('');
+  const [stepError, setStepError] = useState('');
 
   const handleHospitalCodeChange = (code: string, matched: HospitalEntry | undefined) => {
     setHospitalCodeInput(code);
@@ -61,29 +61,104 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
 
   const handleHospitalCodeBlur = () => {
     if (hospitalCodeInput.trim().length > 0 && !findHospitalByCode(hospitalCodeInput)) {
-      setHospitalCodeError('Invalid hospital code. Please check the code with your hospital.');
+      setHospitalCodeError('Invalid hospital code. Accepted codes: 560017, 560076, 560034');
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const validateStep1 = () => {
+    if (!patient.name || patient.name.trim().length < 2) {
+      setStepError('Please enter the patient full name.');
+      return false;
+    }
+    const rawDigits = patient.phone.replace(/\D/g, '');
+    if (!rawDigits || rawDigits.length < 10) {
+      setStepError('Please enter a valid 10-digit mobile number.');
+      return false;
+    }
+    if (!patient.age || patient.age < 1 || patient.age > 125) {
+      setStepError('Please enter a valid age.');
+      return false;
+    }
+    setStepError('');
+    return true;
+  };
+
+  const validateStep2 = () => {
+    if (!patient.address || patient.address.trim().length < 5) {
+      setStepError('Please enter a complete residential address.');
+      return false;
+    }
+    setStepError('');
+    return true;
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setStepError('');
+
     if (step === 1) {
-      setStep(2);
-    } else if (step === 2) {
-      setStep(3);
-    } else {
-      const matched = findHospitalByCode(hospitalCodeInput);
-      if (!matched) {
-        setHospitalCodeError('Invalid hospital code. Please check the code with your hospital.');
+      if (validateStep1()) setStep(2);
+      return;
+    }
+
+    if (step === 2) {
+      if (validateStep2()) setStep(3);
+      return;
+    }
+
+    // Step 3 - Final submission
+    const matched = findHospitalByCode(hospitalCodeInput);
+    if (!matched) {
+      setHospitalCodeError('Invalid hospital code. Accepted codes: 560017, 560076, 560034');
+      return;
+    }
+    setHospitalCodeError('');
+    setLoading(true);
+
+    try {
+      const result = await registerPatientInDb({
+        full_name: patient.name.trim(),
+        phone: patient.phone.trim(),
+        age: patient.age,
+        primary_language: patient.language || 'English',
+        gender: patient.gender || 'Female',
+        address: patient.address.trim(),
+        email: patient.email?.trim() || undefined,
+        emergency_contact: patient.emergencyContact?.trim() || undefined,
+        hospital_code: matched.code,
+      });
+
+      if (!result.success) {
+        setHospitalCodeError(result.error || 'Registration failed.');
+        setLoading(false);
         return;
       }
-      setHospitalCodeError('');
-      setLoading(true);
-      setTimeout(() => {
-        setLoading(false);
-        onRegistered();
-        onNavigate('dashboard');
-      }, 700);
+
+      setPatient((prev) => ({
+        ...prev,
+        name: patient.name.trim(),
+        phone: patient.phone.trim(),
+        age: patient.age,
+        language: patient.language,
+        gender: patient.gender,
+        address: patient.address.trim(),
+        email: patient.email?.trim() || '',
+        emergencyContact: patient.emergencyContact?.trim() || '',
+        hospitalCode: matched.code,
+        hospitalName: matched.name,
+        hospitalArea: matched.area,
+        verified: true,
+      }));
+
+      // Store authenticated session
+      localStorage.setItem('active_patient_phone', patient.phone.trim());
+
+      onRegistered();
+      onNavigate('dashboard');
+    } catch (err: any) {
+      setHospitalCodeError(err?.message || 'Failed to submit registration. Please try again.');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -124,11 +199,18 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
           </p>
         </div>
 
+        {stepError && (
+          <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl flex items-center gap-2 text-xs text-red-700">
+            <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+            <span>{stepError}</span>
+          </div>
+        )}
+
         {/* Stepper Navigation Pills */}
         <div className="flex flex-wrap items-center justify-center gap-1.5 sm:gap-2 mb-6 bg-[#ede8d9] p-1 rounded-2xl sm:rounded-full w-full max-w-md mx-auto border border-[#164529]/10">
           <button
             type="button"
-            onClick={() => setStep(1)}
+            onClick={() => { setStepError(''); setStep(1); }}
             className={`flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
               step === 1
                 ? 'bg-[#164529] text-[#fef9ea] shadow-sm'
@@ -147,7 +229,9 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
 
           <button
             type="button"
-            onClick={() => setStep(2)}
+            onClick={() => {
+              if (validateStep1()) setStep(2);
+            }}
             className={`flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
               step === 2
                 ? 'bg-[#164529] text-[#fef9ea] shadow-sm'
@@ -166,7 +250,9 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
 
           <button
             type="button"
-            onClick={() => setStep(3)}
+            onClick={() => {
+              if (validateStep1() && validateStep2()) setStep(3);
+            }}
             className={`flex items-center gap-1.5 px-3 sm:px-3.5 py-1.5 rounded-full text-xs font-bold transition-all cursor-pointer ${
               step === 3
                 ? 'bg-[#164529] text-[#fef9ea] shadow-sm'
@@ -198,7 +284,10 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
                     type="text"
                     required
                     value={patient.name}
-                    onChange={(e) => setPatient({ ...patient, name: e.target.value })}
+                    onChange={(e) => {
+                      setStepError('');
+                      setPatient({ ...patient, name: e.target.value });
+                    }}
                     placeholder="e.g. Eleanor Vance"
                     className="w-full bg-[#ffffff] text-[#1d1c13] text-sm rounded-xl px-4 py-3 border border-[#164529]/20 focus:border-[#164529] focus:outline-none shadow-sm placeholder:text-[#c1c9c0]"
                   />
@@ -220,9 +309,10 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
                       type="tel"
                       required
                       value={patient.phone.replace('+91 ', '')}
-                      onChange={(e) =>
-                        setPatient({ ...patient, phone: `+91 ${e.target.value.trim()}` })
-                      }
+                      onChange={(e) => {
+                        setStepError('');
+                        setPatient({ ...patient, phone: `+91 ${e.target.value.trim()}` });
+                      }}
                       placeholder="98765 43210"
                       className="w-full bg-[#ffffff] text-[#1d1c13] text-sm rounded-xl px-4 py-3 border border-[#164529]/20 focus:border-[#164529] focus:outline-none shadow-sm placeholder:text-[#c1c9c0]"
                     />
@@ -263,6 +353,8 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
                     <option value="Hindi">Hindi</option>
                     <option value="Bengali">Bengali</option>
                     <option value="Tamil">Tamil</option>
+                    <option value="Kannada">Kannada</option>
+                    <option value="Telugu">Telugu</option>
                     <option value="Marathi">Marathi</option>
                   </select>
                 </div>
@@ -275,7 +367,7 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
               {/* Gender Designation */}
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-[#164529] uppercase tracking-wider">
-                  Gender Designation
+                  Gender Designation <span className="text-[#7a545e]">*</span>
                 </label>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                   {['Female', 'Male', 'Non-binary', 'Other'].map((g) => (
@@ -298,13 +390,17 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
               {/* Delivery Address */}
               <div className="space-y-1">
                 <label className="block text-xs font-bold text-[#164529] uppercase tracking-wider">
-                  Residential Address (For Delivery &amp; Verification)
+                  Residential Address (For Delivery &amp; Verification) <span className="text-[#7a545e]">*</span>
                 </label>
                 <div className="relative">
                   <textarea
                     rows={2}
+                    required
                     value={patient.address}
-                    onChange={(e) => setPatient({ ...patient, address: e.target.value })}
+                    onChange={(e) => {
+                      setStepError('');
+                      setPatient({ ...patient, address: e.target.value });
+                    }}
                     placeholder="e.g. 42 Kensington Mews, Flat B, New Delhi"
                     className="w-full bg-[#ffffff] text-[#1d1c13] text-sm rounded-xl px-4 py-2.5 border border-[#164529]/20 focus:border-[#164529] focus:outline-none shadow-sm placeholder:text-[#c1c9c0] resize-none"
                   />
@@ -359,9 +455,9 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
           <div className="bg-[#ede8d9] p-3 rounded-2xl flex items-center gap-3 border border-[#164529]/10 mt-4">
             <ShieldCheck className="w-5 h-5 text-[#164529] shrink-0" />
             <div className="text-xs">
-              <span className="font-bold text-[#164529] block">Private &amp; Secure</span>
+              <span className="font-bold text-[#164529] block">Private &amp; Secure Record</span>
               <span className="text-[#414942]">
-                Your personal and health information is kept strictly confidential.
+                Your personal and health information is safely stored and encrypted.
               </span>
             </div>
           </div>
@@ -416,7 +512,7 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
                   {loading ? (
                     <span className="flex items-center gap-2">
                       <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-                      Enrolling Patient...
+                      Registering Patient...
                     </span>
                   ) : (
                     <>
@@ -432,7 +528,7 @@ export const RegisterView: React.FC<RegisterViewProps> = ({
               {step === 1 && (
                 <button
                   type="button"
-                  onClick={() => setStep(2)}
+                  onClick={() => { if (validateStep1()) setStep(2); }}
                   className="text-[#7a545e] hover:text-[#164529] transition-colors underline underline-offset-4 cursor-pointer font-semibold"
                 >
                   Preview Step 2 Fields
