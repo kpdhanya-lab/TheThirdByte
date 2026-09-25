@@ -1,0 +1,8 @@
+{
+  "name": "Smart Pharmacy DISPENSARY",
+  "description": "Smart Pharmacy dispensary and verification system featuring pharmacist authentication, queue review, and automated dispensing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
