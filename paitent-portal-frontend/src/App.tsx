@@ -11,7 +11,7 @@ import { DashboardView } from './components/DashboardView';
 import { PrescriptionUploadView } from './components/PrescriptionUploadView';
 import { QueueTrackerView } from './components/QueueTrackerView';
 import { Modals } from './components/Modals';
-import { findPatientByPhone, fetchActiveHospitalCodes } from './utils/supabase';
+import { findPatientByPhone, fetchActiveHospitalCodes, requestPatientSessionToken } from './utils/supabase';
 
 export default function App() {
   const [currentView, setCurrentView] = useState<ViewMode>('home');
@@ -33,6 +33,7 @@ export default function App() {
 
           setPatient((prev) => ({
             ...prev,
+            id: dbPatient.id,
             name: dbPatient.full_name,
             phone: dbPatient.phone,
             age: dbPatient.age,
@@ -47,6 +48,7 @@ export default function App() {
             verified: true,
           }));
           setPhone(dbPatient.phone);
+          requestPatientSessionToken(dbPatient.phone);
         }
       });
     }
@@ -86,16 +88,21 @@ export default function App() {
     setPatient((prev) => ({ ...prev, phone: phone || prev.phone, verified: true }));
     if (phone) {
       localStorage.setItem('active_patient_phone', phone);
+      requestPatientSessionToken(phone);
     }
   };
 
   const handleRegisteredSuccess = () => {
     handlePlayChime();
     setPatient((prev) => ({ ...prev, verified: true }));
+    if (phone) {
+      requestPatientSessionToken(phone);
+    }
   };
 
   const handleLogout = () => {
     localStorage.removeItem('active_patient_phone');
+    localStorage.removeItem('patient_session_token');
     setPatient({
       ...DEFAULT_PATIENT,
       verified: false,

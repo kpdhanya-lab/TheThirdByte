@@ -1,6 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { Prescription, Pharmacist } from '../types';
-import { resolveExtractedData } from '../utils/supabase';
+import {
+  resolveExtractedData,
+  requestGenerateDispenseToken,
+  fetchDispenseTokenForPrescription,
+  updatePrescriptionStatusInSupabase,
+} from '../utils/supabase';
 
 interface DispensingBayProps {
   prescriptions: Prescription[];
@@ -37,9 +42,10 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
   const [countedPills, setCountedPills] = useState<number>(0);
   const [isCountingActive, setIsCountingActive] = useState(false);
   const [pharmacistNotes, setPharmacistNotes] = useState('');
-  const [vendingSlot, setVendingSlot] = useState('');
   const [showLabelPreview, setShowLabelPreview] = useState(false);
   const [actionSuccessMessage, setActionSuccessMessage] = useState<string | null>(null);
+  const [selectedSlot, setSelectedSlot] = useState<1 | 2 | 3>(1);
+  const [isGeneratingToken, setIsGeneratingToken] = useState(false);
 
   // Sync selected prescription if targetRxNumber changes
   useEffect(() => {
@@ -50,13 +56,6 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
 
   const selectedRx =
     prescriptions.find((p) => p.rxNumber === selectedRxNumber) || prescriptions[0];
-
-  // Sync vendingSlot when selectedRx changes
-  useEffect(() => {
-    if (selectedRx) {
-      setVendingSlot(selectedRx.vendingSlot || '');
-    }
-  }, [selectedRx?.rxNumber]);
 
   // Filtering for queue pane
   const filteredList = prescriptions.filter((p) => {
@@ -103,42 +102,88 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
     }, 60);
   };
 
-  // Handle mark ready (Clinical verification sign-off)
-  const handleMarkReady = () => {
+  // Handle mark ready (Clinical verification sign-off & Token Generation)
+  const handleMarkReady = async () => {
     if (!selectedRx) return;
+    setIsGeneratingToken(true);
+    let activeToken = selectedRx.dispenseToken;
+
+    try {
+      const tokenResult = await requestGenerateDispenseToken({
+        prescriptionId: selectedRx.id || selectedRx.rxNumber,
+        slot: selectedSlot,
+        patientName: selectedRx.patient.name,
+        patientId: selectedRx.patient.id,
+      });
+
+      if (tokenResult && tokenResult.success && tokenResult.token) {
+        activeToken = tokenResult.token;
+      }
+    } catch (err) {
+      console.warn('Error during token generation in handleMarkReady:', err);
+    } finally {
+      setIsGeneratingToken(false);
+    }
+
     const updated: Prescription = {
       ...selectedRx,
       status: 'Ready for Dispense',
       verifiedBy: currentPharmacist.name,
       verifiedAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
-      vendingSlot: vendingSlot.trim() || selectedRx.vendingSlot,
+      vendingSlot: `Slot 0${selectedSlot}`,
+      dispenseToken: activeToken,
     };
     onUpdatePrescription(updated);
+    updatePrescriptionStatusInSupabase(selectedRx.rxNumber, 'Ready for Dispense');
+
     if (onNavigate) {
-      onNavigate('dispensing-monitor', selectedRx.rxNumber);
+      onNavigate('approved-ready', selectedRx.rxNumber);
     } else {
       setActionSuccessMessage(
-        `Prescription ${selectedRx.rxNumber} verified${vendingSlot ? ` (Vending Slot: ${vendingSlot})` : ''} and placed in Ready Bin.`
+        `Prescription ${selectedRx.rxNumber} verified, assigned to Slot 0${selectedSlot}, and dispense token created.`
       );
       setTimeout(() => setActionSuccessMessage(null), 3000);
     }
   };
 
   // Handle finalize dispense
-  const handleApproveAndDispense = () => {
+  const handleApproveAndDispense = async () => {
     if (!selectedRx) return;
+    setIsGeneratingToken(true);
+    let activeToken = selectedRx.dispenseToken;
+
+    try {
+      const tokenResult = await requestGenerateDispenseToken({
+        prescriptionId: selectedRx.id || selectedRx.rxNumber,
+        slot: selectedSlot,
+        patientName: selectedRx.patient.name,
+        patientId: selectedRx.patient.id,
+      });
+
+      if (tokenResult && tokenResult.success && tokenResult.token) {
+        activeToken = tokenResult.token;
+      }
+    } catch (err) {
+      console.warn('Error during token generation in handleApproveAndDispense:', err);
+    } finally {
+      setIsGeneratingToken(false);
+    }
+
     const updated: Prescription = {
       ...selectedRx,
       status: 'Dispensed',
       verifiedBy: currentPharmacist.name,
       verifiedAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
+      vendingSlot: `Slot 0${selectedSlot}`,
+      dispenseToken: activeToken,
     };
     onUpdatePrescription(updated);
+    updatePrescriptionStatusInSupabase(selectedRx.rxNumber, 'Dispensed');
 
     if (onRecordTransaction) {
       onRecordTransaction(
         updated,
-        `Prescription ${selectedRx.rxNumber} (${selectedRx.medication.name} ${selectedRx.medication.strength}) certified, packaged, and marked DISPENSED at station ${currentPharmacist.station}.`
+        `Prescription ${selectedRx.rxNumber} (${selectedRx.medication.name} ${selectedRx.medication.strength}) certified, packaged in Slot 0${selectedSlot}, and marked DISPENSED at station ${currentPharmacist.station}.`
       );
     }
 
@@ -146,7 +191,7 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
       onNavigate('dispensing-complete', selectedRx.rxNumber);
     } else {
       setActionSuccessMessage(
-        `Prescription ${selectedRx.rxNumber} has been clinically verified, packaged, and marked DISPENSED.`
+        `Prescription ${selectedRx.rxNumber} clinically verified, assigned to Slot 0${selectedSlot}, and marked DISPENSED.`
       );
       setTimeout(() => setActionSuccessMessage(null), 4000);
     }
@@ -458,8 +503,16 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
             <div className="bg-[#FAF7EE] px-4 py-2.5 rounded-xl border border-[#E5DFCE] text-right">
               <span className="text-[10px] font-sans uppercase text-[#1F2F4F]/60 block font-semibold">Staging Location</span>
               <span className="font-mono text-sm font-bold text-[#2F5D3F]">
-                Ready Bin B-14 (Carousel Slot 03)
+                {selectedRx.vendingSlot ? `Kiosk Dispenser ${selectedRx.vendingSlot}` : `Kiosk Dispenser Slot 0${selectedSlot}`}
               </span>
+              {selectedRx.dispenseToken && (
+                <div className="mt-1 flex items-center justify-end gap-1.5">
+                  <span className="px-2 py-0.5 rounded-lg bg-[#bbefc7]/40 border border-[#164529]/20 text-[11px] font-mono font-bold text-[#164529] flex items-center gap-1">
+                    <span className="material-symbols-outlined text-[13px]">key</span>
+                    <span>{typeof selectedRx.dispenseToken === 'object' ? selectedRx.dispenseToken.token : selectedRx.dispenseToken}</span>
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1165,19 +1218,32 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
                     />
                   </div>
 
-                  {/* Vending Machine Slot Number */}
-                  <div className="pt-1">
-                    <label className="text-[11px] font-semibold text-[#1F2F4F]/80 block mb-1 flex items-center gap-1.5">
-                      <span className="material-symbols-outlined text-[15px] text-[#2F5D3F]">grid_view</span>
-                      <span>Vending Machine Slot Number:</span>
+                  {/* Automated Dispenser Slot Assignment */}
+                  <div className="pt-2">
+                    <label className="text-[11px] font-semibold text-[#1F2F4F]/80 block mb-1.5 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <span className="material-symbols-outlined text-[15px] text-[#2F5D3F]">view_carousel</span>
+                        <span>Automated Kiosk Dispenser Slot:</span>
+                      </span>
+                      <span className="text-[10px] text-[#2F5D3F] font-bold">Issues Live One-Time Token</span>
                     </label>
-                    <input
-                      type="text"
-                      value={vendingSlot}
-                      onChange={(e) => setVendingSlot(e.target.value)}
-                      placeholder="Enter vending machine slot number (e.g. Slot B-14, Bay 03)..."
-                      className="w-full h-10 px-3.5 text-xs bg-[#FAF7EE] border border-[#164529]/15 rounded-xl focus:bg-white focus:outline-none focus:border-[#2F5D3F] text-[#1F2F4F] font-mono font-medium placeholder:font-sans placeholder:text-[#1F2F4F]/50"
-                    />
+                    <div className="grid grid-cols-3 gap-2">
+                      {[1, 2, 3].map((slotNum) => (
+                        <button
+                          key={slotNum}
+                          type="button"
+                          onClick={() => setSelectedSlot(slotNum as 1 | 2 | 3)}
+                          className={`py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                            selectedSlot === slotNum
+                              ? 'bg-[#2F5D3F] text-white border-[#2F5D3F] shadow-xs'
+                              : 'bg-[#FAF7EE] text-[#1F2F4F] border-[#E5DFCE] hover:bg-white'
+                          }`}
+                        >
+                          <span className="material-symbols-outlined text-[15px]">view_carousel</span>
+                          <span>Slot 0{slotNum}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
                   {/* Action Buttons for Review Mode (Retain Print Label and Approve Commands) */}
@@ -1196,10 +1262,20 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
                         <button
                           type="button"
                           onClick={handleMarkReady}
-                          className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-[#2F5D3F] hover:bg-[#234730] text-white text-xs font-bold uppercase tracking-wider shadow-xs transition-all cursor-pointer"
+                          disabled={isGeneratingToken}
+                          className="flex items-center gap-2 px-6 py-2.5 rounded-xl bg-[#2F5D3F] hover:bg-[#234730] text-white text-xs font-bold uppercase tracking-wider shadow-xs transition-all disabled:opacity-50 cursor-pointer"
                         >
-                          <span className="material-symbols-outlined text-[18px]">verified</span>
-                          <span>APPROVE</span>
+                          {isGeneratingToken ? (
+                            <>
+                              <span className="material-symbols-outlined text-[18px] animate-spin">progress_activity</span>
+                              <span>GENERATING TOKEN...</span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="material-symbols-outlined text-[18px]">verified</span>
+                              <span>APPROVE &amp; ISSUE TOKEN</span>
+                            </>
+                          )}
                         </button>
                       </div>
                     </div>
@@ -1322,19 +1398,39 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
                     <span>Preview Prescription Vial Label</span>
                   </button>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-3">
+                    {/* Slot Picker */}
+                    <div className="flex items-center gap-1.5 bg-[#FAF7EE] p-1 rounded-xl border border-[#E5DFCE]">
+                      <span className="text-[10px] uppercase font-bold text-[#1F2F4F]/70 px-1">Slot:</span>
+                      {[1, 2, 3].map((slotNum) => (
+                        <button
+                          key={slotNum}
+                          type="button"
+                          onClick={() => setSelectedSlot(slotNum as 1 | 2 | 3)}
+                          className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                            selectedSlot === slotNum
+                              ? 'bg-[#2F5D3F] text-white shadow-xs'
+                              : 'text-[#1F2F4F] hover:bg-white'
+                          }`}
+                        >
+                          0{slotNum}
+                        </button>
+                      ))}
+                    </div>
+
                     <button
                       type="button"
                       onClick={handleMarkReady}
-                      className="px-4 py-2 rounded-xl bg-white hover:bg-[#FAF7EE] text-[#2F5D3F] border border-[#2F5D3F] text-xs font-semibold cursor-pointer"
+                      disabled={isGeneratingToken}
+                      className="px-4 py-2 rounded-xl bg-white hover:bg-[#FAF7EE] text-[#2F5D3F] border border-[#2F5D3F] text-xs font-semibold cursor-pointer disabled:opacity-50"
                     >
-                      Stage in Ready Bin
+                      {isGeneratingToken ? 'Generating...' : `Stage in Ready Slot 0${selectedSlot}`}
                     </button>
 
                     <button
                       type="button"
                       onClick={handleApproveAndDispense}
-                      disabled={selectedRx.status === 'Dispensed'}
+                      disabled={selectedRx.status === 'Dispensed' || isGeneratingToken}
                       className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#2F5D3F] hover:bg-[#234730] text-white text-xs font-bold uppercase tracking-wider shadow-xs transition-all disabled:opacity-50 cursor-pointer"
                     >
                       <span className="material-symbols-outlined text-[18px]">verified</span>

@@ -8,6 +8,7 @@ export type ViewMode =
   | 'queue';
 
 export interface PatientProfile {
+  id?: string;
   name: string;
   phone: string;
   age: number;
@@ -24,6 +25,18 @@ export interface PatientProfile {
   queuePosition: number;
   counterNumber: string;
   verified: boolean;
+}
+
+export interface DispenseToken {
+  id: string;
+  prescription_id: string;
+  patient_id: string;
+  slot: 1 | 2 | 3;
+  token: string;
+  status: 'issued' | 'dispense_requested' | 'dispensed' | 'expired' | 'cancelled';
+  expires_at: string;
+  created_at: string;
+  used_at: string | null;
 }
 
 export interface MedicationItem {

@@ -234,12 +234,36 @@ export async function fetchHospitalPrescriptions(hospitalCode?: string): Promise
 
     if (!data || data.length === 0) return [];
 
+    // Fetch any associated dispense tokens for these prescriptions
+    const rxIds = data.map((r: any) => r.id).filter(Boolean);
+    const tokensByRxId: Record<string, any> = {};
+    if (rxIds.length > 0) {
+      try {
+        const { data: tokenRows, error: tokenErr } = await supabase
+          .from('dispense_tokens')
+          .select('*')
+          .in('prescription_id', rxIds)
+          .order('created_at', { ascending: false });
+
+        if (!tokenErr && tokenRows) {
+          for (const t of tokenRows) {
+            if (!tokensByRxId[t.prescription_id]) {
+              tokensByRxId[t.prescription_id] = t;
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Could not fetch dispense_tokens:', err);
+      }
+    }
+
     const mapped: Prescription[] = [];
 
     for (const row of data) {
       const meds: any[] = row.medications || [];
       const primaryMed = meds[0] || {};
       const rxNum = `RX-${(row.id || '').slice(0, 8).toUpperCase()}`;
+      const associatedToken = tokensByRxId[row.id];
 
       // Check if any medication has a clinical safety review flag
       const hasReviewFlag = meds.some((m) => m.dosage_safety_flag === 'review_recommended');
@@ -365,6 +389,9 @@ export async function fetchHospitalPrescriptions(hospitalCode?: string): Promise
           : ['Take with water after food', 'Keep out of reach of children'],
         safetyAlerts,
         extractedData,
+        id: row.id,
+        dispenseToken: associatedToken,
+        vendingSlot: associatedToken?.slot ? `Slot ${associatedToken.slot}` : undefined,
       });
     }
 
@@ -498,8 +525,32 @@ export function subscribeToHospitalPrescriptions(
     )
     .subscribe();
 
+  // Also subscribe to dispense_tokens updates (e.g. when patient claims token -> dispense_requested)
+  const tokenChannel = supabase
+    .channel('pharmacist-realtime-dispense-tokens')
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'dispense_tokens',
+      },
+      async (payload) => {
+        const tokenRow: any = payload.new || payload.old;
+        if (tokenRow && tokenRow.prescription_id) {
+          const list = await fetchHospitalPrescriptions(hospitalCode);
+          const match = list.find((p) => p.id === tokenRow.prescription_id);
+          if (match) {
+            onNewPrescription(match);
+          }
+        }
+      }
+    )
+    .subscribe();
+
   return () => {
     supabase.removeChannel(channel);
+    supabase.removeChannel(tokenChannel);
   };
 }
 
@@ -527,3 +578,49 @@ export async function updatePrescriptionStatusInSupabase(
     console.warn('Error updating prescription status in Supabase:', err);
   }
 }
+
+/**
+ * Call server-side API to securely generate a unique one-time dispensing token.
+ * Requirement 1: Pharmacist approves prescription.
+ * Requirement 2: Pharmacist chooses physical dispenser slot (1, 2, 3).
+ * Requirement 3: Unique one-time token generated on server side.
+ * Requirement 4: Server-side cryptographic token generation.
+ */
+export async function requestGenerateDispenseToken(params: {
+  prescriptionId: string;
+  slot: 1 | 2 | 3;
+  patientName?: string;
+  patientId?: string;
+}): Promise<{ success: boolean; token?: any; error?: string }> {
+  try {
+    const res = await fetch('/api/dispense-tokens/generate', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(params),
+    });
+
+    const data = await res.json();
+    return data;
+  } catch (err: any) {
+    console.error('[requestGenerateDispenseToken Error]:', err);
+    return { success: false, error: err?.message || 'Failed to communicate with token server.' };
+  }
+}
+
+/**
+ * Fetch the latest dispensing token for a prescription.
+ */
+export async function fetchDispenseTokenForPrescription(
+  prescriptionId: string
+): Promise<any | null> {
+  try {
+    const res = await fetch(`/api/dispense-tokens/prescription/${encodeURIComponent(prescriptionId)}`);
+    const data = await res.json();
+    return data?.token || null;
+  } catch {
+    return null;
+  }
+}
+

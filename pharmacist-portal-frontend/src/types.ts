@@ -102,6 +102,20 @@ export interface Prescription {
   verifiedAt?: string;
   vendingSlot?: string;
   extractedData?: ExtractedPrescription;
+  id?: string; // Database UUID
+  dispenseToken?: DispenseToken;
+}
+
+export interface DispenseToken {
+  id: string;
+  prescription_id: string;
+  patient_id: string;
+  slot: 1 | 2 | 3;
+  token: string;
+  status: 'issued' | 'dispense_requested' | 'dispensed' | 'expired' | 'cancelled';
+  expires_at: string;
+  created_at: string;
+  used_at: string | null;
 }
 
 export interface DispensaryTransaction {

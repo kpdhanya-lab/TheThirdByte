@@ -10,6 +10,9 @@ export const INITIAL_PHARMACISTS: Pharmacist[] = [
     avatarInitials: 'PS',
     station: 'Station 1',
     securityLevel: 4,
+    hospitalCode: '560017',
+    hospitalName: 'WellnessVibes Hospital',
+    hospitalArea: 'Bengaluru',
   },
   {
     id: 'PH-1002',
@@ -20,6 +23,9 @@ export const INITIAL_PHARMACISTS: Pharmacist[] = [
     avatarInitials: 'AK',
     station: 'Station 2',
     securityLevel: 4,
+    hospitalCode: '560076',
+    hospitalName: 'Narayana Hospital',
+    hospitalArea: 'Bannerghatta Road, Bengaluru',
   },
 ];
 

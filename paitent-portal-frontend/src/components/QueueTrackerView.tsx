@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { PatientProfile, PrescriptionOrder, ViewMode, ExtractedPrescription } from '../types';
+import { PatientProfile, PrescriptionOrder, ViewMode, ExtractedPrescription, DispenseToken } from '../types';
 import {
   Clock,
   Store,
@@ -14,8 +14,14 @@ import {
   Check,
   CheckCircle,
   AlertCircle,
+  KeyRound,
 } from 'lucide-react';
 import { playDispensaryChime } from '../utils/audio';
+import {
+  fetchActiveDispenseToken,
+  claimDispenseTokenApi,
+  subscribeToPatientDispenseTokens,
+} from '../utils/supabase';
 
 interface QueueTrackerViewProps {
   patient: PatientProfile;
@@ -37,6 +43,68 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
   const [isVendingModalOpen, setIsVendingModalOpen] = useState(false);
   const [vendingPhase, setVendingPhase] = useState<'idle' | 'authenticating' | 'dispensing' | 'completed'>('idle');
   const [vendedItems, setVendedItems] = useState<number[]>([]);
+
+  // Active Dispense Token States (Requirements 10-16)
+  const [activeToken, setActiveToken] = useState<DispenseToken | null>(null);
+  const [isLoadingToken, setIsLoadingToken] = useState(true);
+  const [isClaiming, setIsClaiming] = useState(false);
+  const [claimError, setClaimError] = useState<string | null>(null);
+  const [claimSuccessMessage, setClaimSuccessMessage] = useState<string | null>(null);
+  const [tokenCountdown, setTokenCountdown] = useState<string>('');
+
+  // Live countdown timer for active token expiration (Requirement 2 & 15-minute TTL)
+  useEffect(() => {
+    if (!activeToken?.expires_at) {
+      setTokenCountdown('');
+      return;
+    }
+
+    const calculateRemaining = () => {
+      const expMs = new Date(activeToken.expires_at).getTime();
+      const diffMs = expMs - Date.now();
+      if (diffMs <= 0) {
+        setTokenCountdown('Expired');
+        return;
+      }
+      const mins = Math.floor(diffMs / 60000);
+      const secs = Math.floor((diffMs % 60000) / 1000);
+      const formattedTime = new Date(activeToken.expires_at).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      setTokenCountdown(`${formattedTime} (${mins}m ${secs.toString().padStart(2, '0')}s remaining)`);
+    };
+
+    calculateRemaining();
+    const interval = setInterval(calculateRemaining, 1000);
+    return () => clearInterval(interval);
+  }, [activeToken?.expires_at]);
+
+  // Fetch active token and subscribe to realtime changes (Requirement 10)
+  useEffect(() => {
+    let isMounted = true;
+    setIsLoadingToken(true);
+
+    fetchActiveDispenseToken().then((res) => {
+      if (isMounted) {
+        if (res.success && res.token) {
+          setActiveToken(res.token);
+        }
+        setIsLoadingToken(false);
+      }
+    });
+
+    const unsubscribe = subscribeToPatientDispenseTokens(patient.id, (token) => {
+      if (isMounted) {
+        setActiveToken(token);
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, [patient.id]);
 
   // Metadata resolution (prefers extracted data if present, otherwise order and patient)
   const displayPatientName = extractedPrescription?.patient_name || patient.name || 'Eleanor Vance';
@@ -78,6 +146,45 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
           reason: m.category,
         }));
 
+  // Handle DISPENSE MEDICINE click (Atomic claim via server) (Requirements 11, 12, 13, 14, 15, 16)
+  const handleDispenseMedicine = async () => {
+    if (!activeToken) {
+      setClaimError('No active dispensing token available. Please wait for pharmacist approval.');
+      return;
+    }
+
+    if (activeToken.status !== 'issued') {
+      if (activeToken.status === 'dispense_requested') {
+        setClaimError('Dispensing request already submitted for Slot ' + activeToken.slot + '. Please collect your medication.');
+      } else if (activeToken.status === 'dispensed') {
+        setClaimError('Medication has already been dispensed.');
+      } else if (activeToken.status === 'expired') {
+        setClaimError('This token has expired. Please contact pharmacy staff.');
+      } else {
+        setClaimError('Token cannot be claimed in status: ' + activeToken.status);
+      }
+      return;
+    }
+
+    setIsClaiming(true);
+    setClaimError(null);
+    setClaimSuccessMessage(null);
+
+    // Call server to atomically claim the token (Requirement 13 & 14)
+    const res = await claimDispenseTokenApi(activeToken.token);
+
+    if (res.success && res.token) {
+      setActiveToken(res.token);
+      setClaimSuccessMessage(`Dispensing authorized for Slot ${res.token.slot}! Robotic delivery chute opened.`);
+      setIsClaiming(false);
+      // Trigger dispensing modal
+      handleStartVend();
+    } else {
+      setClaimError(res.error || 'Failed to claim dispensing token.');
+      setIsClaiming(false);
+    }
+  };
+
   // Handle trigger vend
   const handleStartVend = () => {
     setIsVendingModalOpen(true);
@@ -112,24 +219,84 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
 
   return (
     <div className="w-full max-w-6xl mx-auto py-6 sm:py-10 px-4 sm:px-6 lg:px-8 flex flex-col gap-6">
-      {/* Top Header & Vend Medicine Action */}
+      {/* Top Header & DISPENSE MEDICINE Action (Requirement 11) */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-        <h1 className="font-serif text-2xl sm:text-3xl lg:text-4xl text-[#164529] font-bold tracking-tight">
-          Live Dispensing Queue &amp; Pickup Tracker
-        </h1>
+        <div>
+          <h1 className="font-serif text-2xl sm:text-3xl lg:text-4xl text-[#164529] font-bold tracking-tight">
+            Live Dispensing Queue &amp; Pickup Tracker
+          </h1>
+          <p className="text-xs text-[#555f56] mt-1">
+            Real-time status of your digitized prescription &amp; automated kiosk slot delivery
+          </p>
+        </div>
 
-        <div className="flex items-center gap-2.5 self-start lg:self-auto">
+        <div className="flex items-center gap-2.5 self-start lg:self-auto flex-wrap">
+          {/* DISPENSE MEDICINE Button (Requirement 11) */}
           <button
-            onClick={handleStartVend}
-            className="px-5 py-2.5 rounded-full bg-[#164529] hover:bg-[#2f5d3f] text-[#ffffff] text-xs font-bold flex items-center gap-2 transition-all shadow-sm active:scale-95 cursor-pointer"
+            onClick={handleDispenseMedicine}
+            disabled={isClaiming || !activeToken || activeToken.status !== 'issued'}
+            className={`px-6 py-2.5 rounded-full text-xs font-bold uppercase tracking-wider flex items-center gap-2 transition-all shadow-md active:scale-95 cursor-pointer disabled:cursor-not-allowed ${
+              activeToken?.status === 'issued'
+                ? 'bg-[#164529] hover:bg-[#2f5d3f] text-[#ffffff] ring-2 ring-[#bbefc7]/40'
+                : activeToken?.status === 'dispense_requested'
+                ? 'bg-[#b45309] text-white opacity-90'
+                : activeToken?.status === 'dispensed'
+                ? 'bg-[#164529]/70 text-white opacity-70'
+                : 'bg-[#164529]/40 text-white/70'
+            }`}
           >
-            <PackageCheck className="w-4 h-4 text-[#bbefc7]" />
-            <span>Vend Medicine</span>
+            {isClaiming ? (
+              <Loader2 className="w-4 h-4 animate-spin text-[#bbefc7]" />
+            ) : (
+              <PackageCheck className="w-4 h-4 text-[#bbefc7]" />
+            )}
+            <span>
+              {isClaiming
+                ? 'CLAIMING...'
+                : activeToken?.status === 'issued'
+                ? 'DISPENSE MEDICINE'
+                : activeToken?.status === 'dispense_requested'
+                ? `DISPENSE REQUESTED (SLOT ${activeToken.slot})`
+                : activeToken?.status === 'dispensed'
+                ? 'MEDICINE DISPENSED'
+                : 'DISPENSE MEDICINE'}
+            </span>
           </button>
         </div>
       </div>
 
-      {/* Hero Spotlight: Token & Details Banner */}
+      {/* Alert Notices for Claims */}
+      {claimError && (
+        <div className="w-full p-4 rounded-2xl bg-[#FFF2F0] border border-[#FFCCC7] text-xs text-[#A8071A] flex items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-[#A8071A] shrink-0" />
+            <span>{claimError}</span>
+          </div>
+          <button
+            onClick={() => setClaimError(null)}
+            className="text-[#A8071A] hover:opacity-70 p-1 cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {claimSuccessMessage && (
+        <div className="w-full p-4 rounded-2xl bg-[#E6F7FF] border border-[#91D5FF] text-xs text-[#0050B3] flex items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-[#0050B3] shrink-0" />
+            <span>{claimSuccessMessage}</span>
+          </div>
+          <button
+            onClick={() => setClaimSuccessMessage(null)}
+            className="text-[#0050B3] hover:opacity-70 p-1 cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Hero Spotlight: Token & Details Banner (Requirement 10) */}
       <div className="bg-[#164529] text-[#fef9ea] rounded-3xl p-6 sm:p-8 relative overflow-hidden shadow-xl">
         {/* Glow */}
         <div className="absolute -right-20 -top-20 w-80 h-80 rounded-full bg-[#bbefc7]/10 blur-3xl pointer-events-none"></div>
@@ -137,37 +304,91 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
         <div className="relative z-10 flex flex-col gap-6">
           {/* Token Header Row */}
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-            <div className="flex items-start sm:items-center gap-4 sm:gap-6">
-              {/* Monogram Badge */}
-              <div className="bg-[#fef9ea] text-[#164529] px-4 sm:px-6 py-3 rounded-2xl flex flex-col items-center justify-center shadow-md">
-                <span className="text-[10px] font-bold text-[#7a545e] tracking-widest uppercase">
-                  YOUR TOKEN
+            <div className="flex items-start sm:items-center gap-4 sm:gap-6 flex-wrap sm:flex-nowrap">
+              {/* Monogram Badge (Displays Active Token - Requirement 10) */}
+              <div className="bg-[#fef9ea] text-[#164529] px-4 sm:px-6 py-3 rounded-2xl flex flex-col items-center justify-center shadow-md min-w-[140px]">
+                <span className="text-[10px] font-bold text-[#7a545e] tracking-widest uppercase flex items-center gap-1">
+                  <KeyRound className="w-3 h-3 text-[#164529]" />
+                  <span>DISPENSE TOKEN</span>
                 </span>
-                <span className="font-sans text-3xl sm:text-4xl text-[#164529] font-bold tracking-tight">
-                  {patient.tokenNumber}
+                <span className="font-mono text-2xl sm:text-3xl text-[#164529] font-bold tracking-tight mt-0.5">
+                  {activeToken ? activeToken.token : patient.tokenNumber}
                 </span>
+                {activeToken?.slot && (
+                  <span className="mt-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#164529] text-[#bbefc7] tracking-wider uppercase">
+                    Slot {activeToken.slot}
+                  </span>
+                )}
               </div>
 
-              <div className="flex flex-col gap-1">
-                <div className="flex items-center gap-2">
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-serif text-xl sm:text-2xl text-[#ffffff] font-bold">
                     {patient.name}
                   </span>
                   <span className="px-2.5 py-0.5 rounded-full bg-[#2f5d3f] text-[#bbefc7] text-[10px] font-bold">
                     Primary Patient
                   </span>
+                  {activeToken && (
+                    <span
+                      className={`px-3 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5 ${
+                        activeToken.status === 'issued'
+                          ? 'bg-[#bbefc7] text-[#164529]'
+                          : activeToken.status === 'dispense_requested'
+                          ? 'bg-[#FFF7E6] text-[#D46B08] border border-[#FFD591]'
+                          : 'bg-white/20 text-white'
+                      }`}
+                    >
+                      <span className={`w-1.5 h-1.5 rounded-full ${activeToken.status === 'issued' ? 'bg-[#164529]' : 'bg-[#D46B08] animate-ping'}`} />
+                      <span>{activeToken.status === 'dispense_requested' ? 'Dispensing Requested' : `Status: ${activeToken.status}`}</span>
+                    </span>
+                  )}
                 </div>
                 <div className="flex flex-wrap items-center gap-3 text-xs text-[#ede8d9]">
                   <span className="flex items-center gap-1.5">
                     <Store className="w-3.5 h-3.5 text-[#ffcdd9]" />
-                    {patient.counterNumber} — Main Dispensary Hall
+                    {activeToken ? `Physical Dispenser: Slot ${activeToken.slot}` : `${patient.counterNumber} — Main Dispensary`}
                   </span>
                   <span>•</span>
                   <span className="flex items-center gap-1.5">
                     <Clock className="w-3.5 h-3.5 text-[#bbefc7]" />
-                    Handover ETA: <strong className="text-[#ffffff]">10:48 AM</strong> (approx. 8 mins)
+                    <span>{activeToken ? `Expiration: ${tokenCountdown || '15 minutes'}` : 'Handover ETA: approx. 8 mins'}</span>
                   </span>
                 </div>
+
+                {/* Patient Action Prompt inside Hero Spotlight (Requirements 3, 6, 7) */}
+                {activeToken?.status === 'issued' && (
+                  <div className="pt-2">
+                    <button
+                      onClick={handleDispenseMedicine}
+                      disabled={isClaiming}
+                      className="px-6 py-2.5 rounded-xl bg-[#bbefc7] hover:bg-[#a2d4ae] text-[#164529] text-xs font-bold uppercase tracking-wider flex items-center gap-2 transition-all shadow-md active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      {isClaiming ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin text-[#164529]" />
+                          <span>PROCESSING DISPENSE...</span>
+                        </>
+                      ) : (
+                        <>
+                          <PackageCheck className="w-4 h-4 text-[#164529]" />
+                          <span>DISPENSE MEDICINE</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+
+                {/* UI changes to 'Dispensing Requested' on success (Requirement 7) */}
+                {activeToken?.status === 'dispense_requested' && (
+                  <div className="pt-2">
+                    <div className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#FFF7E6] text-[#D46B08] border border-[#FFD591] text-xs font-bold uppercase tracking-wider shadow-sm">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#D46B08] animate-pulse" />
+                      <span>Dispensing Requested</span>
+                      <span className="text-[10px] text-[#D46B08]/80 font-mono">(Slot {activeToken.slot})</span>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -386,7 +607,7 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
                     Automated Dispensary Kiosk
                   </h3>
                   <p className="text-[11px] text-[#bbefc7]">
-                    Kiosk {patient.counterNumber || 'Counter 03'} • Token #{patient.tokenNumber}
+                    Physical Dispenser Slot {activeToken?.slot || 1} • Token {activeToken?.token || patient.tokenNumber}
                   </p>
                 </div>
               </div>
@@ -412,8 +633,10 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
                   <>
                     <Loader2 className="w-6 h-6 animate-spin text-[#164529] shrink-0" />
                     <div>
-                      <h4 className="font-serif font-bold text-sm">Authenticating Prescription...</h4>
-                      <p className="text-xs text-[#555f56]">Connecting to robotic dispensing bay and verifying prescription {displayRxId}</p>
+                      <h4 className="font-serif font-bold text-sm">Authenticating Dispensing Token...</h4>
+                      <p className="text-xs text-[#555f56]">
+                        Verified token {activeToken?.token} for Physical Dispenser Slot {activeToken?.slot || 1}
+                      </p>
                     </div>
                   </>
                 ) : vendingPhase === 'dispensing' ? (
@@ -421,15 +644,19 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
                     <Loader2 className="w-6 h-6 animate-spin text-[#164529] shrink-0" />
                     <div>
                       <h4 className="font-serif font-bold text-sm">Dispensing Medication in Progress...</h4>
-                      <p className="text-xs text-[#555f56]">Robotic arm is unlocking slots and dropping packaged bottles into chute</p>
+                      <p className="text-xs text-[#555f56]">
+                        Dispenser Slot {activeToken?.slot || 1} actuator active: releasing packaged medication
+                      </p>
                     </div>
                   </>
                 ) : (
                   <>
                     <CheckCircle className="w-6 h-6 text-[#164529] shrink-0" />
                     <div>
-                      <h4 className="font-serif font-bold text-sm">Medications Vended Successfully!</h4>
-                      <p className="text-xs text-[#555f56]">Please collect your medicines from the dispensing retrieval chute below</p>
+                      <h4 className="font-serif font-bold text-sm">Medications Dispensed Successfully!</h4>
+                      <p className="text-xs text-[#555f56]">
+                        Please collect your medicines from Physical Dispenser Slot {activeToken?.slot || 1} retrieval bay
+                      </p>
                     </div>
                   </>
                 )}

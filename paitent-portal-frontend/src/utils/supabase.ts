@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { ExtractedPrescription } from '../types/prescriptionExtraction';
+import { DispenseToken } from '../types';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || 'https://rjpigsvmxyvpjcbkxidt.supabase.co';
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJqcGlnc3ZteHl2cGpjYmt4aWR0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAzMTA2NjAsImV4cCI6MjEwNTg4NjY2MH0.NaQ4bTetBLcPs_KENgg5Qu0X-zgW0r9al2VWVaJGASg';
@@ -259,4 +260,151 @@ export async function saveExtractedPrescriptionToSupabase(
     return { success: false, error: err?.message || String(err) };
   }
 }
+
+/**
+ * Obtain a cryptographically signed patient session token from the server
+ * based on verified patient phone/identity in Supabase.
+ */
+export async function requestPatientSessionToken(phone: string): Promise<string | null> {
+  try {
+    const res = await fetch('/api/auth/patient-session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone }),
+    });
+
+    const data = await res.json();
+    if (data.success && data.sessionToken) {
+      localStorage.setItem('patient_session_token', data.sessionToken);
+      return data.sessionToken;
+    }
+    return null;
+  } catch (err) {
+    console.warn('[requestPatientSessionToken] Error:', err);
+    return null;
+  }
+}
+
+/**
+ * Get active patient session token
+ */
+export function getPatientSessionToken(): string | null {
+  return localStorage.getItem('patient_session_token');
+}
+
+/**
+ * Fetch the active dispensing token for the authenticated patient from the server.
+ * Requirement 10: Display the active token in the patient portal.
+ */
+export async function fetchActiveDispenseToken(): Promise<{ success: boolean; token?: DispenseToken | null; error?: string }> {
+  try {
+    const sessionToken = getPatientSessionToken();
+    const headers: Record<string, string> = {};
+    if (sessionToken) {
+      headers['Authorization'] = `Bearer ${sessionToken}`;
+    }
+
+    const res = await fetch('/api/dispense-tokens/active', {
+      method: 'GET',
+      headers,
+    });
+
+    const data = await res.json();
+    return data;
+  } catch (err: any) {
+    console.error('[fetchActiveDispenseToken Error]:', err);
+    return { success: false, error: err?.message || 'Failed to fetch active token.' };
+  }
+}
+
+/**
+ * Securely redeem an active dispensing token exactly once.
+ * Calls the Supabase Edge Function: redeem-dispense-token.
+ * Requirement 5: Edge function verifies authenticated patient, verifies token ownership,
+ * checks status is 'issued', checks expiration, atomically updates to 'dispense_requested',
+ * sets used_at, and rejects duplicate clicks.
+ */
+export async function claimDispenseTokenApi(token: string): Promise<{ success: boolean; token?: DispenseToken; error?: string; status?: number }> {
+  try {
+    const sessionToken = getPatientSessionToken();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (sessionToken) {
+      headers['Authorization'] = `Bearer ${sessionToken}`;
+    }
+
+    // 1. Invoke Supabase Edge Function: redeem-dispense-token
+    try {
+      const { data: edgeData, error: edgeError } = await supabase.functions.invoke('redeem-dispense-token', {
+        body: { token },
+        headers,
+      });
+
+      if (!edgeError && edgeData && edgeData.success) {
+        return {
+          success: true,
+          token: edgeData as DispenseToken,
+          status: 200,
+        };
+      } else if (edgeError) {
+        // If Edge function returned an application error response
+        const errMsg = (edgeError as any)?.context?.message || edgeError.message;
+        if (errMsg && !errMsg.includes('Failed to send a request') && !errMsg.includes('FunctionsFetchError')) {
+          return {
+            success: false,
+            error: errMsg,
+            status: (edgeError as any)?.context?.status || 400,
+          };
+        }
+      }
+    } catch (edgeCallErr: any) {
+      console.warn('[Supabase Edge Function redeem-dispense-token notice]:', edgeCallErr?.message);
+    }
+
+    // 2. Direct fallback to backend server endpoint for local development
+    const res = await fetch('/api/dispense-tokens/claim', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ token }),
+    });
+
+    const data = await res.json();
+    return { ...data, status: res.status };
+  } catch (err: any) {
+    console.error('[claimDispenseTokenApi Error]:', err);
+    return { success: false, error: err?.message || 'Network error claiming token.', status: 500 };
+  }
+}
+
+/**
+ * Subscribe to realtime dispense token updates for the patient.
+ */
+export function subscribeToPatientDispenseTokens(
+  patientId: string | undefined,
+  onTokenChange: (token: DispenseToken) => void
+) {
+  const channel = supabase
+    .channel('patient-realtime-tokens')
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'dispense_tokens',
+      },
+      (payload) => {
+        const row: any = payload.new || payload.old;
+        if (row && (!patientId || row.patient_id === patientId)) {
+          onTokenChange(row as DispenseToken);
+        }
+      }
+    )
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+}
+
 
