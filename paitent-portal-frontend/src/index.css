@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-serif: 'Playfair Display', Georgia, serif;
+    --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  html {
+    font-family: var(--font-sans);
+    background-color: #fef9ea;
+    color: #1d1c13;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    min-height: 100vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+}
+
+.font-serif {
+  font-family: var(--font-serif);
+}
+
+.font-sans {
+  font-family: var(--font-sans);
+}
+
+/* Authentic Apothecary awning stripe */
+.awning-stripe {
+  background-image: repeating-linear-gradient(
+    90deg,
+    #164529,
+    #164529 16px,
+    #ffcdd9 16px,
+    #ffcdd9 32px
+  );
+}
+
+.awning-stripe-vertical {
+  background-image: repeating-linear-gradient(
+    0deg,
+    #164529,
+    #164529 14px,
+    #ffcdd9 14px,
+    #ffcdd9 28px
+  );
+}
+
+/* Subtle scrolling marquee */
+@keyframes marquee {
+  0% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-marquee {
+  display: flex;
+  width: max-content;
+  animation: marquee 30s linear infinite;
+}
+
+.animate-marquee:hover {
+  animation-play-state: paused;
+}
+
+/* Clean minimal scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f8f3e4;
+}
+::-webkit-scrollbar-thumb {
+  background: #c1c9c0;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #717971;
+}

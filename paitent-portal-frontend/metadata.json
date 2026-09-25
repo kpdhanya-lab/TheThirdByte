@@ -1,0 +1,7 @@
+{
+  "name": "Smart Pharmacy Dispensary",
+  "description": "Boutique apothecary and patient dispensary portal featuring live queue tracking, AI prescription analysis, and real-time medication compounding updates.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
