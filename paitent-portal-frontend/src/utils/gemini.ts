@@ -1,4 +1,3 @@
-import { GoogleGenAI } from '@google/genai';
 import {
   ExtractedPrescription,
   PRESCRIPTION_EXTRACTION_PROMPT,
@@ -6,36 +5,7 @@ import {
 } from '../types/prescriptionExtraction';
 
 /**
- * Get Gemini API Key from localStorage, Vite env, or process.env
- */
-export function getApiKey(): string {
-  if (typeof window !== 'undefined') {
-    const localKey = localStorage.getItem('gemini_api_key');
-    if (localKey && localKey.trim()) return localKey.trim();
-  }
-  const envKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (import.meta as any).env?.GEMINI_API_KEY;
-  if (envKey) return envKey;
-  if (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) {
-    return process.env.GEMINI_API_KEY;
-  }
-  return '';
-}
-
-/**
- * Set Gemini API Key in localStorage for quick browser testing
- */
-export function setApiKeyOverride(key: string) {
-  if (typeof window !== 'undefined') {
-    if (key.trim()) {
-      localStorage.setItem('gemini_api_key', key.trim());
-    } else {
-      localStorage.removeItem('gemini_api_key');
-    }
-  }
-}
-
-/**
- * Convert a File object to pure base64 string (without the data URL prefix)
+ * Convert a File object to base64 data string and detect mimeType
  */
 export async function fileToBase64(file: File): Promise<{ base64Data: string; mimeType: string }> {
   return new Promise((resolve, reject) => {
@@ -53,144 +23,88 @@ export async function fileToBase64(file: File): Promise<{ base64Data: string; mi
 }
 
 /**
- * Format user-facing error message based on Gemini API error codes
+ * Send API key to the backend server to update server-side GROQ_API_KEY.
+ * The browser never retains or directly uses the key for AI calls.
  */
-function formatGeminiError(err: any): string {
-  const msg = err?.message || String(err);
-  if (msg.includes('403') || msg.includes('denied access') || msg.includes('PERMISSION_DENIED')) {
-    return 'Your Google AI Studio/Cloud project was denied access (PERMISSION_DENIED 403). Please verify that the Generative Language API is enabled or try an active API key.';
+export async function updateServerGroqApiKey(apiKey: string): Promise<{ success: boolean; message: string }> {
+  const res = await fetch('/api/config/groq-key', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey: apiKey.trim() }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.error || `Server responded with status ${res.status}`);
   }
-  if (msg.includes('429') || msg.includes('Rate limit')) {
-    return 'Gemini Free Tier rate limit reached (429). Spikes in demand or daily quota exceeded. Please wait a minute or try again.';
-  }
-  if (msg.includes('503') || msg.includes('high demand')) {
-    return 'Gemini model is currently experiencing high demand (503). Please retry in a few moments.';
-  }
-  return msg || 'Failed to extract structured data with Gemini.';
+  return res.json();
 }
 
 /**
- * Extract structured prescription data from an uploaded file using Gemini 3.8 Flash
+ * Check if GROQ_API_KEY is configured on the server
+ */
+export async function checkServerGroqKeyConfigured(): Promise<boolean> {
+  try {
+    const res = await fetch('/api/config/groq-key');
+    if (!res.ok) return false;
+    const data = await res.json();
+    return Boolean(data.configured);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Extract prescription details via the backend server (which calls Groq's vision endpoint via OpenAI SDK).
+ * No AI calls originate from the client browser.
  */
 export async function extractPrescriptionFromImage(file: File): Promise<ExtractedPrescription> {
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    throw new Error('Gemini API key is not configured. Please add VITE_GEMINI_API_KEY to your .env file or enter it in settings.');
-  }
-
   const { base64Data, mimeType } = await fileToBase64(file);
-  const isPdf = mimeType.toLowerCase().includes('pdf') || file.name.toLowerCase().endsWith('.pdf');
 
-  const ai = new GoogleGenAI({ apiKey });
+  const response = await fetch('/api/extract-prescription', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      imageBase64: base64Data,
+      mimeType,
+    }),
+  });
 
-  // Prepare multimodal content parts
-  const contentInput: any[] = [
-    {
-      type: 'text',
-      text: PRESCRIPTION_EXTRACTION_PROMPT,
-    },
-    {
-      type: isPdf ? 'document' : 'image',
-      data: base64Data,
-      mime_type: isPdf ? 'application/pdf' : mimeType,
-    },
-  ];
+  const result = await response.json().catch(() => ({
+    success: false,
+    error: `Server responded with status ${response.status}`,
+  }));
 
-  let rawJsonText: string | null = null;
-  let lastError: any = null;
-
-  // Primary call: Interactions API with response_format JSON schema
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const interaction = await ai.interactions.create({
-        model: 'gemini-3.8-flash',
-        input: contentInput,
-        response_format: {
-          type: 'text',
-          mime_type: 'application/json',
-          schema: PRESCRIPTION_RESPONSE_SCHEMA,
-        },
-      });
-
-      rawJsonText = interaction.output_text ?? null;
-      if (rawJsonText) break;
-    } catch (err: any) {
-      lastError = err;
-      console.warn(`[Gemini Extraction] Attempt ${attempt} failed:`, err?.message || err);
-      if (attempt < 2) {
-        await new Promise((res) => setTimeout(res, 1000 * attempt));
-      }
-    }
+  if (!response.ok || !result.success) {
+    throw new Error(result.error || 'Failed to extract prescription with Groq API.');
   }
 
-  // Fallback call using generateContent if interactions was unavailable
-  if (!rawJsonText) {
-    try {
-      const fallbackRes = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: PRESCRIPTION_EXTRACTION_PROMPT },
-              {
-                inlineData: {
-                  mimeType: isPdf ? 'application/pdf' : mimeType,
-                  data: base64Data,
-                },
-              },
-            ],
-          },
-        ],
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: PRESCRIPTION_RESPONSE_SCHEMA,
-        },
-      });
-      rawJsonText = fallbackRes.text ?? null;
-    } catch (fallbackErr: any) {
-      console.error('[Gemini Fallback Error]:', fallbackErr);
-      throw new Error(formatGeminiError(lastError || fallbackErr));
-    }
-  }
-
-  if (!rawJsonText) {
-    throw new Error('Gemini returned an empty response. Please verify the prescription image is clear and try again.');
-  }
-
-  try {
-    const parsed = JSON.parse(rawJsonText) as ExtractedPrescription;
-    // Normalize nulls and defaults
-    return {
-      patient_name: parsed.patient_name || null,
-      patient_dob: parsed.patient_dob || null,
-      patient_age: parsed.patient_age || null,
-      patient_weight: parsed.patient_weight || null,
-      prescriber_name: parsed.prescriber_name || null,
-      prescriber_clinic: parsed.prescriber_clinic || null,
-      date_written: parsed.date_written || null,
-      signature_present: parsed.signature_present || 'unclear',
-      medications: Array.isArray(parsed.medications)
-        ? parsed.medications.map((m) => ({
-            medication_name: m.medication_name || null,
-            strength: m.strength || null,
-            dosage_form: m.dosage_form || null,
-            quantity: m.quantity || null,
-            sig: m.sig || null,
-            legibility: m.legibility || 'legible',
-            dosage_safety_flag: m.dosage_safety_flag || 'not_determinable',
-            dosage_safety_reason: m.dosage_safety_reason || null,
-          }))
-        : [],
-    };
-  } catch (parseErr) {
-    console.error('Failed to parse Gemini JSON output:', rawJsonText, parseErr);
-    throw new Error('Unable to parse the structured medical data returned by Gemini.');
-  }
+  const parsed = result.data as ExtractedPrescription;
+  return {
+    patient_name: parsed.patient_name ?? null,
+    patient_dob: parsed.patient_dob ?? null,
+    patient_age: parsed.patient_age ?? null,
+    patient_weight: parsed.patient_weight ?? null,
+    prescriber_name: parsed.prescriber_name ?? null,
+    prescriber_clinic: parsed.prescriber_clinic ?? null,
+    date_written: parsed.date_written ?? null,
+    signature_present: parsed.signature_present || 'unclear',
+    medications: Array.isArray(parsed.medications)
+      ? parsed.medications.map((m) => ({
+          medication_name: m.medication_name ?? null,
+          strength: m.strength ?? null,
+          dosage_form: m.dosage_form ?? null,
+          quantity: m.quantity ?? null,
+          sig: m.sig ?? null,
+          legibility: m.legibility || 'legible',
+          dosage_safety_flag: m.dosage_safety_flag || 'not_determinable',
+          dosage_safety_reason: m.dosage_safety_reason ?? null,
+        }))
+      : [],
+  };
 }
 
 /**
- * Returns a high-fidelity sample prescription extraction matching the schema for immediate demo/fallback testing
+ * Returns a clinical sample prescription extraction matching the schema for immediate demo/fallback testing
  */
 export function getSamplePrescriptionExtraction(): ExtractedPrescription {
   return {

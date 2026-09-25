@@ -63,6 +63,78 @@ SAFETY FLAG RULES (for "dosage_safety_flag" and "dosage_safety_reason")
 
 Return only the structured data — no commentary outside the schema.`;
 
+/**
+ * Strict JSON Schema format for OpenAI SDK / Groq structured output (response_format: json_schema).
+ * Adheres strictly to:
+ * - additionalProperties: false on every object
+ * - All properties listed in required
+ * - Union types ["string", "null"] for nullable fields
+ */
+export const GROQ_STRICT_PRESCRIPTION_SCHEMA = {
+  type: 'object',
+  properties: {
+    patient_name: { type: ['string', 'null'] },
+    patient_dob: { type: ['string', 'null'] },
+    patient_age: { type: ['string', 'null'] },
+    patient_weight: { type: ['string', 'null'] },
+    prescriber_name: { type: ['string', 'null'] },
+    prescriber_clinic: { type: ['string', 'null'] },
+    date_written: { type: ['string', 'null'] },
+    signature_present: {
+      type: 'string',
+      enum: ['present', 'absent', 'unclear'],
+    },
+    medications: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          medication_name: { type: ['string', 'null'] },
+          strength: { type: ['string', 'null'] },
+          dosage_form: { type: ['string', 'null'] },
+          quantity: { type: ['string', 'null'] },
+          sig: { type: ['string', 'null'] },
+          legibility: {
+            type: 'string',
+            enum: ['legible', 'partially_legible', 'illegible'],
+          },
+          dosage_safety_flag: {
+            type: 'string',
+            enum: ['none', 'review_recommended', 'not_determinable'],
+          },
+          dosage_safety_reason: { type: ['string', 'null'] },
+        },
+        required: [
+          'medication_name',
+          'strength',
+          'dosage_form',
+          'quantity',
+          'sig',
+          'legibility',
+          'dosage_safety_flag',
+          'dosage_safety_reason',
+        ],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: [
+    'patient_name',
+    'patient_dob',
+    'patient_age',
+    'patient_weight',
+    'prescriber_name',
+    'prescriber_clinic',
+    'date_written',
+    'signature_present',
+    'medications',
+  ],
+  additionalProperties: false,
+};
+
+/**
+ * Standard Gemini response schema (kept for backwards compatibility)
+ */
 export const PRESCRIPTION_RESPONSE_SCHEMA = {
   type: 'object',
   properties: {

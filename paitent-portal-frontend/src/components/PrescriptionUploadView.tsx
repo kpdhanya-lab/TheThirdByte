@@ -4,8 +4,8 @@ import { ExtractedPrescription } from '../types/prescriptionExtraction';
 import {
   extractPrescriptionFromImage,
   getSamplePrescriptionExtraction,
-  getApiKey,
-  setApiKeyOverride,
+  updateServerGroqApiKey,
+  checkServerGroqKeyConfigured,
 } from '../utils/gemini';
 import {
   Clock,
@@ -50,13 +50,50 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
   );
   const [submitted, setSubmitted] = useState(false);
   const [showKeyInput, setShowKeyInput] = useState(false);
-  const [apiKeyInput, setApiKeyInput] = useState(getApiKey());
+  const [apiKeyInput, setApiKeyInput] = useState('');
+  const [isKeyConfigured, setIsKeyConfigured] = useState<boolean | null>(null);
+  const [keySaveMessage, setKeySaveMessage] = useState<string | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
-  // Trigger Gemini AI extraction for a File
+  // Check if Groq key is already configured on the server
+  React.useEffect(() => {
+    checkServerGroqKeyConfigured().then((configured) => {
+      setIsKeyConfigured(configured);
+      if (!configured) {
+        setShowKeyInput(true);
+      }
+    });
+  }, []);
+
+  const handleSaveKey = async (customKey?: string): Promise<boolean> => {
+    const keyToSave = (customKey !== undefined ? customKey : apiKeyInput).trim();
+    if (!keyToSave) {
+      alert('Please enter a valid Groq API key (starts with gsk_).');
+      return false;
+    }
+    try {
+      const res = await updateServerGroqApiKey(keyToSave);
+      setIsKeyConfigured(true);
+      setKeySaveMessage(res.message || 'Key saved to server!');
+      setApiKeyInput('');
+      setExtractionError(null);
+      setTimeout(() => setKeySaveMessage(null), 4000);
+      return true;
+    } catch (err: any) {
+      alert(`Failed to save key to server: ${err?.message || err}`);
+      return false;
+    }
+  };
+
+  // Trigger Groq AI extraction for a File
   const processFile = async (file: File) => {
     setScanning(true);
     setExtractionError(null);
+
+    // If user typed a key in the input, save it first before calling extraction
+    if (apiKeyInput.trim()) {
+      await handleSaveKey();
+    }
 
     const previewUrl = URL.createObjectURL(file);
     const newDoc: AttachedDoc = {
@@ -82,7 +119,7 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
     } catch (err: any) {
       console.error('Prescription extraction failed:', err);
       setExtractionError(
-        err?.message || 'Failed to extract prescription data with Gemini AI. Please check your connection or retry.'
+        err?.message || 'Failed to extract prescription data with Groq AI. Please check your connection or retry.'
       );
     } finally {
       setScanning(false);
@@ -105,7 +142,10 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
     }
   };
 
-  const handleRetryExtraction = () => {
+  const handleRetryExtraction = async () => {
+    if (apiKeyInput.trim()) {
+      await handleSaveKey();
+    }
     if (attachedDoc?.file) {
       processFile(attachedDoc.file);
     } else if (fileInputRef.current) {
@@ -232,20 +272,103 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
 
       {/* Header Editorial Titles */}
       <div className="space-y-1.5 pt-1">
-        <div className="flex items-center gap-2">
-          <h1 className="font-serif text-2xl sm:text-3xl text-[#164529] tracking-tight font-semibold">
-            Upload Your Prescription
-          </h1>
-          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#164529]/10 text-[#164529]">
-            <Sparkles className="w-3.5 h-3.5" />
-            Gemini 3.8 Flash
-          </span>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2">
+            <h1 className="font-serif text-2xl sm:text-3xl text-[#164529] tracking-tight font-semibold">
+              Upload Your Prescription
+            </h1>
+            <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#164529]/10 text-[#164529]">
+              <Sparkles className="w-3.5 h-3.5" />
+              Groq Vision • Qwen 3.8
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowKeyInput(!showKeyInput)}
+            className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-colors cursor-pointer ${
+              isKeyConfigured
+                ? 'bg-[#e7f5ec] text-[#164529] hover:bg-[#d6eedf]'
+                : 'bg-[#ffdad6] text-[#ba1a1a] hover:bg-[#ffcdd2] animate-pulse'
+            }`}
+          >
+            <Key className="w-3.5 h-3.5" />
+            {isKeyConfigured ? '🟢 Groq Key: Active' : '🔴 Groq Key: Missing'}
+          </button>
         </div>
         <p className="text-sm text-[#414942] leading-relaxed">
-          Upload or take a photo of your doctor slip. Gemini AI extracts medication dosages and verifies
-          safety flags for pharmacist review before dispensing.
+          Upload or take a photo of your doctor slip. Groq Vision AI extracts medication dosages and verifies
+          safety flags on the secure server for pharmacist review before dispensing.
         </p>
       </div>
+
+      {/* Server Groq Key Drawer */}
+      {showKeyInput && (
+        <div className="bg-[#ffffff] rounded-2xl p-4 border border-[#164529]/20 shadow-sm space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-bold text-[#164529]">
+              <Key className="w-4 h-4" />
+              <span>Configure Server-Side GROQ_API_KEY</span>
+            </div>
+            <span className="text-[10px] bg-[#e7f5ec] text-[#164529] px-2 py-0.5 rounded-full font-bold">
+              Stored in Server .env Only
+            </span>
+          </div>
+          <p className="text-xs text-[#555f56] leading-relaxed">
+            Paste your Groq API key below and press <kbd className="bg-[#ede8d9] px-1 py-0.5 rounded text-[#164529] font-mono text-[10px]">Enter</kbd> or click <strong>Save to Server</strong>.
+            All AI calls execute server-side; your key is never exposed to the client.
+          </p>
+
+          {/* Warning if user mistakenly pastes a Gemini key */}
+          {apiKeyInput.trim() && (apiKeyInput.startsWith('AQ.') || apiKeyInput.startsWith('AIza')) && (
+            <div className="p-2.5 rounded-xl bg-[#fff0f0] border border-[#ba1a1a]/30 text-xs text-[#ba1a1a] flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>
+                <strong>Notice:</strong> This looks like a Gemini API key. Groq API keys begin with <code className="font-mono bg-[#ffffff] px-1 py-0.5 rounded">gsk_</code>.
+                Get a free Groq key in seconds at <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer" className="underline font-bold">console.groq.com/keys</a>.
+              </span>
+            </div>
+          )}
+
+          {/* Key save feedback notification */}
+          {keySaveMessage && (
+            <div className="p-2.5 rounded-xl bg-[#e7f5ec] border border-[#164529]/20 text-xs text-[#164529] flex items-center gap-2 font-medium">
+              <CheckCircle2 className="w-4 h-4 text-[#164529] shrink-0" />
+              <span>{keySaveMessage}</span>
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <input
+              type="password"
+              value={apiKeyInput}
+              onChange={(e) => setApiKeyInput(e.target.value)}
+              onKeyDown={async (e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  const ok = await handleSaveKey();
+                  if (ok) {
+                    handleRetryExtraction();
+                  }
+                }
+              }}
+              placeholder="Paste Groq API key (starts with gsk_...)"
+              className="flex-1 text-xs px-3 py-2 rounded-xl border border-[#717971]/30 focus:outline-none focus:ring-1 focus:ring-[#164529] bg-[#fdfbf7]"
+            />
+            <button
+              type="button"
+              onClick={async () => {
+                const ok = await handleSaveKey();
+                if (ok) {
+                  handleRetryExtraction();
+                }
+              }}
+              className="px-4 py-2 rounded-xl text-xs font-bold bg-[#164529] text-white hover:bg-[#2f5d3f] transition-all cursor-pointer whitespace-nowrap shadow-sm"
+            >
+              Save to Server
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Upload Drop Zone Card */}
       <div
@@ -368,16 +491,16 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
           </div>
           <div className="space-y-1">
             <h3 className="font-serif text-lg font-semibold text-[#164529]">
-              Gemini 3.8 Flash Analyzing Prescription...
+              Groq Vision AI (Qwen 3.8) Analyzing Prescription...
             </h3>
             <p className="text-xs text-[#414942] max-w-md">
-              Reading doctor handwriting, transcribing directions, checking prescriber signature, and
-              evaluating dosage safety flags against patient clinical profile.
+              Server-side extraction reading doctor handwriting, transcribing directions as written, checking prescriber
+              signature, and evaluating dosage safety flags.
             </p>
           </div>
           <div className="flex items-center gap-2 text-[11px] font-semibold text-[#164529] bg-[#e7f5ec] px-3 py-1 rounded-full">
             <Sparkles className="w-3.5 h-3.5" />
-            Generating structured JSON according to clinical schema
+            Generating strict JSON schema via OpenAI SDK on Groq endpoint
           </div>
         </div>
       )}
@@ -388,10 +511,55 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
           <div className="flex items-start gap-3">
             <AlertTriangle className="w-5 h-5 text-[#ba1a1a] shrink-0 mt-0.5" />
             <div className="space-y-1">
-              <h4 className="text-sm font-bold text-[#ba1a1a]">Digitization Notice</h4>
+              <h4 className="text-sm font-bold text-[#ba1a1a]">Digitization Notice (Groq / Gemini)</h4>
               <p className="text-xs text-[#7d1212] leading-relaxed">{extractionError}</p>
             </div>
           </div>
+
+          {/* Quick inline key entry if error is missing or invalid key */}
+          {(extractionError.includes('GROQ_API_KEY is not configured') || extractionError.includes('401') || extractionError.includes('Invalid Groq API Key')) && (
+            <div className="bg-[#ffffff] p-3 rounded-xl border border-[#ba1a1a]/20 space-y-2 mt-2">
+              <label className="text-[11px] font-bold text-[#414942] block">
+                Enter your Groq API key (starts with <code className="bg-[#ede8d9] px-1 py-0.5 rounded text-[#164529] font-mono">gsk_</code>):
+              </label>
+              {apiKeyInput.trim() && (apiKeyInput.startsWith('AQ.') || apiKeyInput.startsWith('AIza')) && (
+                <p className="text-[11px] text-[#ba1a1a] font-medium">
+                  ⚠️ This appears to be a Gemini key. Groq keys start with <code className="font-mono">gsk_</code>.
+                </p>
+              )}
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  onKeyDown={async (e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      const ok = await handleSaveKey();
+                      if (ok) {
+                        handleRetryExtraction();
+                      }
+                    }
+                  }}
+                  placeholder="Paste your Groq key (gsk_...)"
+                  className="flex-1 text-xs px-3 py-1.5 rounded-lg border border-[#717971]/40 focus:outline-none focus:ring-1 focus:ring-[#164529]"
+                />
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const ok = await handleSaveKey();
+                    if (ok) {
+                      handleRetryExtraction();
+                    }
+                  }}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-[#164529] text-white hover:bg-[#2f5d3f] cursor-pointer shadow-xs whitespace-nowrap"
+                >
+                  Save &amp; Retry
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center gap-2 pt-1">
             <button
               type="button"
@@ -416,42 +584,7 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
               <Sparkles className="w-3.5 h-3.5" />
               Load Sample Clinical Table (Demo)
             </button>
-            <button
-              type="button"
-              onClick={() => setShowKeyInput(!showKeyInput)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-[#ffffff] border border-[#ba1a1a]/30 text-[#ba1a1a] hover:bg-[#fff0f0] transition-colors cursor-pointer"
-            >
-              <Key className="w-3.5 h-3.5" />
-              {showKeyInput ? 'Hide Key Config' : 'Update Gemini API Key'}
-            </button>
           </div>
-
-          {showKeyInput && (
-            <div className="bg-[#ffffff] p-3 rounded-xl border border-[#ba1a1a]/20 space-y-2 mt-2">
-              <label className="text-[11px] font-bold text-[#414942] block">
-                Update Gemini API Key (saved in browser for instant testing):
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  value={apiKeyInput}
-                  onChange={(e) => setApiKeyInput(e.target.value)}
-                  placeholder="Paste your Gemini API key (AQ.Ab8RN...)"
-                  className="flex-1 text-xs px-3 py-1.5 rounded-lg border border-[#717971]/40 focus:outline-none focus:ring-1 focus:ring-[#164529]"
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setApiKeyOverride(apiKeyInput);
-                    handleRetryExtraction();
-                  }}
-                  className="px-3 py-1.5 rounded-lg text-xs font-bold bg-[#164529] text-white hover:bg-[#2f5d3f]"
-                >
-                  Save &amp; Retry
-                </button>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -468,7 +601,7 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
                 </h2>
               </div>
               <p className="text-xs text-[#555f56]">
-                Extracted via Gemini 3.8 Flash structured output. Review the digitized items below.
+                Extracted via Groq Vision (Qwen 3.8) structured output. Review the digitized items below.
               </p>
             </div>
 
