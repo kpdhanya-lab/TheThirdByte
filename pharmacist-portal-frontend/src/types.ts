@@ -7,6 +7,9 @@ export interface Pharmacist {
   avatarInitials: string;
   station: string;
   securityLevel: number;
+  hospitalCode?: string;
+  hospitalName?: string;
+  hospitalArea?: string;
 }
 
 export type PriorityLevel = 'STAT' | 'Urgent' | 'Routine' | 'Discharge';

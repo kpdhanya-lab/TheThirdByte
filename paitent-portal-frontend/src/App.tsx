@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ViewMode, PatientProfile, PrescriptionOrder, AttachedDoc } from './types';
+import { ViewMode, PatientProfile, PrescriptionOrder, AttachedDoc, ExtractedPrescription } from './types';
 import { DEFAULT_PATIENT, SAMPLE_ORDER } from './data';
 import { playDispensaryChime } from './utils/audio';
 import { Header } from './components/Header';
@@ -104,6 +104,28 @@ export default function App() {
     handleNavigate('home');
   };
 
+  const handlePrescriptionExtracted = (extracted: ExtractedPrescription) => {
+    if (extracted.medications && extracted.medications.length > 0) {
+      setOrder((prev) => ({
+        ...prev,
+        doctorName: extracted.prescriber_name || prev.doctorName,
+        doctorClinic: extracted.prescriber_clinic || prev.doctorClinic,
+        orderDate: extracted.date_written || prev.orderDate,
+        medications: extracted.medications.map((m, idx) => ({
+          id: `med-${idx + 1}`,
+          name: m.medication_name || 'Prescribed Medicine',
+          dosage: m.strength || 'As directed',
+          form: m.dosage_form || 'Formulation as directed',
+          instructions: m.sig || 'Follow directions as written',
+          batchNumber: `#RX-${Math.floor(1000 + Math.random() * 9000)}`,
+          status: 'Compounding & Sealed',
+          matchPercent: m.legibility === 'legible' ? 100 : m.legibility === 'partially_legible' ? 75 : 40,
+          category: m.dosage_safety_flag === 'review_recommended' ? 'Flagged for Clinical Review' : 'Prescription',
+        })),
+      }));
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#fef9ea] text-[#1d1c13] flex flex-col selection:bg-[#ffcdd9] selection:text-[#164529]">
       {/* 1. Primary Navigation Bar with mobile menu drawer */}
@@ -172,6 +194,7 @@ export default function App() {
             setAttachedDoc={setAttachedDoc}
             onNavigate={handleNavigate}
             onPreviewDoc={(doc) => setDocPreviewDoc(doc)}
+            onPrescriptionExtracted={handlePrescriptionExtracted}
           />
         )}
 

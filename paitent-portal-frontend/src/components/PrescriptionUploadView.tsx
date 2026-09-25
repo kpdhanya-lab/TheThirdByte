@@ -1,5 +1,12 @@
 import React, { useState } from 'react';
 import { AttachedDoc, ViewMode } from '../types';
+import { ExtractedPrescription } from '../types/prescriptionExtraction';
+import {
+  extractPrescriptionFromImage,
+  getSamplePrescriptionExtraction,
+  getApiKey,
+  setApiKeyOverride,
+} from '../utils/gemini';
 import {
   Clock,
   ShieldCheck,
@@ -10,6 +17,14 @@ import {
   FileUp,
   ArrowRight,
   Bookmark,
+  Sparkles,
+  AlertTriangle,
+  CheckCircle2,
+  XCircle,
+  AlertCircle,
+  RefreshCw,
+  Pill,
+  Key,
 } from 'lucide-react';
 
 interface PrescriptionUploadViewProps {
@@ -17,6 +32,7 @@ interface PrescriptionUploadViewProps {
   setAttachedDoc: (doc: AttachedDoc | null) => void;
   onNavigate: (view: ViewMode) => void;
   onPreviewDoc: (doc: AttachedDoc) => void;
+  onPrescriptionExtracted?: (extracted: ExtractedPrescription) => void;
 }
 
 export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
@@ -24,25 +40,59 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
   setAttachedDoc,
   onNavigate,
   onPreviewDoc,
+  onPrescriptionExtracted,
 }) => {
   const [isDragging, setIsDragging] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [extractionError, setExtractionError] = useState<string | null>(null);
+  const [extractedData, setExtractedData] = useState<ExtractedPrescription | null>(
+    attachedDoc?.extractedPrescription || null
+  );
   const [submitted, setSubmitted] = useState(false);
+  const [showKeyInput, setShowKeyInput] = useState(false);
+  const [apiKeyInput, setApiKeyInput] = useState(getApiKey());
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  // Trigger Gemini AI extraction for a File
+  const processFile = async (file: File) => {
+    setScanning(true);
+    setExtractionError(null);
+
+    const previewUrl = URL.createObjectURL(file);
+    const newDoc: AttachedDoc = {
+      fileName: file.name,
+      fileSize: `${(file.size / (1024 * 1024)).toFixed(1)} MB`,
+      fileType: file.type.includes('pdf') ? 'PDF Document' : 'High Resolution Scan',
+      uploadTime: 'Just now',
+      file,
+      previewUrl,
+    };
+    setAttachedDoc(newDoc);
+
+    try {
+      const extracted = await extractPrescriptionFromImage(file);
+      setExtractedData(extracted);
+      setAttachedDoc({
+        ...newDoc,
+        extractedPrescription: extracted,
+      });
+      if (onPrescriptionExtracted) {
+        onPrescriptionExtracted(extracted);
+      }
+    } catch (err: any) {
+      console.error('Prescription extraction failed:', err);
+      setExtractionError(
+        err?.message || 'Failed to extract prescription data with Gemini AI. Please check your connection or retry.'
+      );
+    } finally {
+      setScanning(false);
+    }
+  };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      setScanning(true);
-      setTimeout(() => {
-        setAttachedDoc({
-          fileName: file.name,
-          fileSize: `${(file.size / (1024 * 1024)).toFixed(1)} MB`,
-          fileType: file.type.includes('pdf') ? 'PDF Document' : 'High Resolution Scan',
-          uploadTime: 'Just now',
-        });
-        setScanning(false);
-      }, 900);
+      processFile(file);
     }
   };
 
@@ -51,48 +101,149 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
     setIsDragging(false);
     const file = e.dataTransfer.files?.[0];
     if (file) {
-      setScanning(true);
-      setTimeout(() => {
-        setAttachedDoc({
-          fileName: file.name,
-          fileSize: `${(file.size / (1024 * 1024)).toFixed(1)} MB`,
-          fileType: 'High Resolution Scan',
-          uploadTime: 'Just now',
-        });
-        setScanning(false);
-      }, 900);
+      processFile(file);
+    }
+  };
+
+  const handleRetryExtraction = () => {
+    if (attachedDoc?.file) {
+      processFile(attachedDoc.file);
+    } else if (fileInputRef.current) {
+      fileInputRef.current.click();
     }
   };
 
   const handleSubmit = () => {
+    if (extractedData && onPrescriptionExtracted) {
+      onPrescriptionExtracted(extractedData);
+    }
     setSubmitted(true);
     setTimeout(() => {
       onNavigate('queue');
     }, 700);
   };
 
+  // Helper badge color for signature
+  const renderSignatureBadge = (sigStatus: 'present' | 'absent' | 'unclear') => {
+    switch (sigStatus) {
+      case 'present':
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-[#e7f5ec] text-[#164529] border border-[#164529]/20">
+            <CheckCircle2 className="w-3.5 h-3.5 text-[#164529]" />
+            Signature Verified
+          </span>
+        );
+      case 'absent':
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-[#fde8e8] text-[#ba1a1a] border border-[#ba1a1a]/20">
+            <XCircle className="w-3.5 h-3.5 text-[#ba1a1a]" />
+            Signature Absent
+          </span>
+        );
+      case 'unclear':
+      default:
+        return (
+          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-[#fff4db] text-[#b45309] border border-[#b45309]/20">
+            <AlertCircle className="w-3.5 h-3.5 text-[#b45309]" />
+            Signature Unclear
+          </span>
+        );
+    }
+  };
+
+  // Helper badge for legibility
+  const renderLegibilityBadge = (legibility: 'legible' | 'partially_legible' | 'illegible') => {
+    switch (legibility) {
+      case 'legible':
+        return (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-[#e7f5ec] text-[#164529]">
+            Legible
+          </span>
+        );
+      case 'partially_legible':
+        return (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-[#fff4db] text-[#b45309]">
+            Partial
+          </span>
+        );
+      case 'illegible':
+        return (
+          <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-[#fde8e8] text-[#ba1a1a]">
+            Illegible
+          </span>
+        );
+    }
+  };
+
+  // Helper badge for dosage safety flag
+  const renderSafetyFlagBadge = (flag: 'none' | 'review_recommended' | 'not_determinable', reason: string | null) => {
+    switch (flag) {
+      case 'none':
+        return (
+          <div className="flex flex-col gap-0.5">
+            <span className="inline-flex items-center gap-1 w-fit px-2 py-0.5 rounded text-[11px] font-medium bg-[#e7f5ec] text-[#164529]">
+              <CheckCircle2 className="w-3 h-3 text-[#164529]" />
+              Normal Range
+            </span>
+            {reason && <span className="text-[10px] text-[#414942] italic">{reason}</span>}
+          </div>
+        );
+      case 'review_recommended':
+        return (
+          <div className="flex flex-col gap-1">
+            <span className="inline-flex items-center gap-1 w-fit px-2 py-0.5 rounded text-[11px] font-semibold bg-[#fde8e8] text-[#ba1a1a] border border-[#ba1a1a]/30 animate-pulse">
+              <AlertTriangle className="w-3 h-3 text-[#ba1a1a]" />
+              Review Recommended
+            </span>
+            {reason && (
+              <span className="text-[11px] text-[#ba1a1a] font-medium bg-[#fff0f0] p-1.5 rounded border border-[#ba1a1a]/15">
+                {reason}
+              </span>
+            )}
+          </div>
+        );
+      case 'not_determinable':
+      default:
+        return (
+          <div className="flex flex-col gap-0.5">
+            <span className="inline-flex items-center gap-1 w-fit px-2 py-0.5 rounded text-[11px] font-medium bg-[#ede8d9] text-[#555f56]">
+              <AlertCircle className="w-3 h-3 text-[#555f56]" />
+              Not Determinable
+            </span>
+            {reason && <span className="text-[10px] text-[#717971]">{reason}</span>}
+          </div>
+        );
+    }
+  };
+
   return (
-    <div className="w-full max-w-xl mx-auto py-4 sm:py-8 px-4 flex flex-col gap-4">
+    <div className="w-full max-w-4xl mx-auto py-4 sm:py-8 px-4 flex flex-col gap-5">
       {/* Trust Bar Badge */}
       <div className="flex items-center justify-between bg-[#f8f3e4] px-4 py-2.5 rounded-2xl border border-[#164529]/15 shadow-xs">
         <div className="flex items-center gap-2 text-[#414942]">
           <Clock className="w-4 h-4 text-[#164529]" />
-          <span className="text-xs font-semibold tracking-wide">Average Review ~5 mins</span>
+          <span className="text-xs font-semibold tracking-wide">Average Pharmacist Review ~5 mins</span>
         </div>
         <div className="flex items-center gap-1.5 text-[#164529]">
           <ShieldCheck className="w-4 h-4" />
-          <span className="text-[10px] font-bold tracking-widest uppercase">SECURE DISPENSARY</span>
+          <span className="text-[10px] font-bold tracking-widest uppercase">SECURE DISPENSARY • AI ASSISTED</span>
         </div>
       </div>
 
       {/* Header Editorial Titles */}
       <div className="space-y-1.5 pt-1">
-        <h1 className="font-serif text-2xl sm:text-3xl text-[#164529] tracking-tight font-semibold">
-          Upload Your Prescription
-        </h1>
+        <div className="flex items-center gap-2">
+          <h1 className="font-serif text-2xl sm:text-3xl text-[#164529] tracking-tight font-semibold">
+            Upload Your Prescription
+          </h1>
+          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#164529]/10 text-[#164529]">
+            <Sparkles className="w-3.5 h-3.5" />
+            Gemini 3.8 Flash
+          </span>
+        </div>
         <p className="text-sm text-[#414942] leading-relaxed">
-          Our AI helps read your prescription details before our pharmacist verifies every
-          medication.
+          Upload or take a photo of your doctor slip. Gemini AI extracts medication dosages and verifies
+          safety flags for pharmacist review before dispensing.
         </p>
       </div>
 
@@ -115,11 +266,11 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
           type="file"
           ref={fileInputRef}
           onChange={handleFileUpload}
-          accept=".pdf,.png,.jpg,.jpeg,.heic"
+          accept=".pdf,.png,.jpg,.jpeg,.heic,.webp"
           className="hidden"
         />
 
-        {/* Capsule / Scanner Icon Visual */}
+        {/* Scanner Visual Icon */}
         <div className="w-16 h-16 rounded-full bg-[#ede8d9] flex items-center justify-center text-[#164529] relative shadow-inner">
           <FileUp className="w-7 h-7" />
           <span className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-[#164529] text-[#ffffff] flex items-center justify-center shadow">
@@ -131,33 +282,34 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
           <p className="font-serif text-base font-medium text-[#1d1c13] leading-snug">
             Tap or Drag &amp; Drop your prescription here or browse files from your device
           </p>
-          <p className="text-xs text-[#717971]">PDF, PNG, JPG, HEIC • Max limit 25MB</p>
+          <p className="text-xs text-[#717971]">PDF, PNG, JPG, WEBP • Max limit 25MB</p>
         </div>
 
-        {/* Mobile Scanner Primary Action CTA */}
-        <div className="w-full pt-1">
+        {/* Scanner CTA Button */}
+        <div className="w-full max-w-sm pt-1">
           <button
             type="button"
             onClick={(e) => {
               e.stopPropagation();
               fileInputRef.current?.click();
             }}
-            className="w-full min-h-[52px] bg-[#164529] hover:bg-[#2f5d3f] text-[#ffffff] rounded-full px-5 py-3 flex flex-col items-center justify-center shadow-md active:scale-[0.98] transition-all cursor-pointer"
+            disabled={scanning}
+            className="w-full min-h-[50px] bg-[#164529] hover:bg-[#2f5d3f] text-[#ffffff] rounded-full px-5 py-2.5 flex flex-col items-center justify-center shadow-md active:scale-[0.98] transition-all cursor-pointer disabled:opacity-75"
           >
             <div className="flex items-center gap-2">
               <Camera className="w-4 h-4" />
               <span className="font-serif text-sm font-bold tracking-wide">
-                {scanning ? 'Analyzing Slip with AI...' : 'Use Mobile Scanner'}
+                {scanning ? 'Gemini AI Extracting Prescription...' : 'Choose or Scan Prescription'}
               </span>
             </div>
             <span className="text-[10px] text-[#a2d4ae] pt-0.5">
-              Captures handwritten doctor slips with high optical fidelity
+              High fidelity optical digitization with structured output
             </span>
           </button>
         </div>
       </div>
 
-      {/* Attached Document Card */}
+      {/* Attached Document Summary Card */}
       {attachedDoc ? (
         <div className="bg-[#f3eedf] rounded-2xl p-4 shadow-sm border border-[#164529]/15 space-y-2">
           <div className="flex items-center justify-between">
@@ -193,7 +345,11 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => setAttachedDoc(null)}
+                onClick={() => {
+                  setAttachedDoc(null);
+                  setExtractedData(null);
+                  setExtractionError(null);
+                }}
                 className="w-9 h-9 rounded-full flex items-center justify-center text-[#ba1a1a] hover:bg-[#ffdad6] transition-colors cursor-pointer"
                 title="Remove document"
               >
@@ -202,24 +358,284 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
             </div>
           </div>
         </div>
-      ) : (
-        <div className="p-4 rounded-2xl bg-[#ede8d9]/50 border border-dashed border-[#164529]/20 text-center text-xs text-[#414942]">
-          No document attached yet. Upload or scan your prescription to run AI extraction.
+      ) : null}
+
+      {/* AI Extraction Loading State */}
+      {scanning && (
+        <div className="bg-[#ffffff] rounded-2xl p-6 border-2 border-[#164529]/20 shadow-sm flex flex-col items-center justify-center text-center gap-3 animate-pulse">
+          <div className="w-12 h-12 rounded-full bg-[#164529]/10 flex items-center justify-center text-[#164529]">
+            <RefreshCw className="w-6 h-6 animate-spin text-[#164529]" />
+          </div>
+          <div className="space-y-1">
+            <h3 className="font-serif text-lg font-semibold text-[#164529]">
+              Gemini 3.8 Flash Analyzing Prescription...
+            </h3>
+            <p className="text-xs text-[#414942] max-w-md">
+              Reading doctor handwriting, transcribing directions, checking prescriber signature, and
+              evaluating dosage safety flags against patient clinical profile.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 text-[11px] font-semibold text-[#164529] bg-[#e7f5ec] px-3 py-1 rounded-full">
+            <Sparkles className="w-3.5 h-3.5" />
+            Generating structured JSON according to clinical schema
+          </div>
         </div>
       )}
 
-      {/* Primary Action Buttons */}
+      {/* AI Extraction Error State */}
+      {extractionError && !scanning && (
+        <div className="bg-[#fff0f0] rounded-2xl p-4 border border-[#ba1a1a]/30 shadow-sm space-y-3">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-[#ba1a1a] shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <h4 className="text-sm font-bold text-[#ba1a1a]">Digitization Notice</h4>
+              <p className="text-xs text-[#7d1212] leading-relaxed">{extractionError}</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={handleRetryExtraction}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-[#ba1a1a] text-white hover:bg-[#921414] transition-colors cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Retry Extraction
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const sample = getSamplePrescriptionExtraction();
+                setExtractedData(sample);
+                setExtractionError(null);
+                if (onPrescriptionExtracted) {
+                  onPrescriptionExtracted(sample);
+                }
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-[#164529] text-white hover:bg-[#2f5d3f] transition-colors cursor-pointer"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              Load Sample Clinical Table (Demo)
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowKeyInput(!showKeyInput)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-[#ffffff] border border-[#ba1a1a]/30 text-[#ba1a1a] hover:bg-[#fff0f0] transition-colors cursor-pointer"
+            >
+              <Key className="w-3.5 h-3.5" />
+              {showKeyInput ? 'Hide Key Config' : 'Update Gemini API Key'}
+            </button>
+          </div>
+
+          {showKeyInput && (
+            <div className="bg-[#ffffff] p-3 rounded-xl border border-[#ba1a1a]/20 space-y-2 mt-2">
+              <label className="text-[11px] font-bold text-[#414942] block">
+                Update Gemini API Key (saved in browser for instant testing):
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={apiKeyInput}
+                  onChange={(e) => setApiKeyInput(e.target.value)}
+                  placeholder="Paste your Gemini API key (AQ.Ab8RN...)"
+                  className="flex-1 text-xs px-3 py-1.5 rounded-lg border border-[#717971]/40 focus:outline-none focus:ring-1 focus:ring-[#164529]"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setApiKeyOverride(apiKeyInput);
+                    handleRetryExtraction();
+                  }}
+                  className="px-3 py-1.5 rounded-lg text-xs font-bold bg-[#164529] text-white hover:bg-[#2f5d3f]"
+                >
+                  Save &amp; Retry
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Extracted Structured JSON Table (Rendered in upload panel before submitting) */}
+      {extractedData && !scanning && (
+        <div className="bg-[#ffffff] rounded-3xl p-5 sm:p-6 shadow-sm border border-[#164529]/15 space-y-5">
+          {/* Card Header & Metadata */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#164529]/10 pb-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-[#164529]" />
+                <h2 className="font-serif text-lg sm:text-xl font-bold text-[#164529]">
+                  Digitized Prescription Summary
+                </h2>
+              </div>
+              <p className="text-xs text-[#555f56]">
+                Extracted via Gemini 3.8 Flash structured output. Review the digitized items below.
+              </p>
+            </div>
+
+            {/* Prescriber Signature Badge */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold text-[#414942]">Prescriber Signature:</span>
+              {renderSignatureBadge(extractedData.signature_present)}
+            </div>
+          </div>
+
+          {/* Header Metadata Grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-[#f8f3e4] p-3.5 rounded-2xl border border-[#164529]/10 text-xs">
+            <div>
+              <span className="text-[10px] font-bold text-[#717971] uppercase tracking-wider block">
+                PATIENT
+              </span>
+              <span className="font-semibold text-[#1d1c13]">
+                {extractedData.patient_name || 'Not stated on slip'}
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] font-bold text-[#717971] uppercase tracking-wider block">
+                DOB / AGE &amp; WEIGHT
+              </span>
+              <span className="font-semibold text-[#1d1c13]">
+                {extractedData.patient_dob || extractedData.patient_age
+                  ? `${extractedData.patient_dob || ''} ${extractedData.patient_age ? `(${extractedData.patient_age})` : ''}`
+                  : 'Age missing'}{' '}
+                • {extractedData.patient_weight ? `${extractedData.patient_weight}` : 'Weight unstated'}
+              </span>
+            </div>
+            <div>
+              <span className="text-[10px] font-bold text-[#717971] uppercase tracking-wider block">
+                PRESCRIBER
+              </span>
+              <span className="font-semibold text-[#1d1c13]">
+                {extractedData.prescriber_name || 'Prescriber Name N/A'}
+              </span>
+              {extractedData.prescriber_clinic && (
+                <span className="text-[10px] text-[#555f56] block truncate">
+                  {extractedData.prescriber_clinic}
+                </span>
+              )}
+            </div>
+            <div>
+              <span className="text-[10px] font-bold text-[#717971] uppercase tracking-wider block">
+                DATE WRITTEN
+              </span>
+              <span className="font-semibold text-[#1d1c13]">
+                {extractedData.date_written || 'Undated'}
+              </span>
+            </div>
+          </div>
+
+          {/* Table Container */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <h3 className="font-serif text-sm font-bold text-[#164529] flex items-center gap-1.5">
+                <Pill className="w-4 h-4 text-[#164529]" />
+                Medications &amp; Dosage Safety Triage
+              </h3>
+              <span className="text-xs text-[#555f56] font-medium">
+                {extractedData.medications.length}{' '}
+                {extractedData.medications.length === 1 ? 'Medication' : 'Medications'} detected
+              </span>
+            </div>
+
+            {extractedData.medications.length === 0 ? (
+              <div className="p-4 rounded-xl bg-[#f8f3e4] text-center text-xs text-[#555f56]">
+                No distinct medications were legible on this prescription. A pharmacist will review the raw
+                scan manually.
+              </div>
+            ) : (
+              <div className="overflow-x-auto rounded-xl border border-[#164529]/15">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-[#ede8d9] text-[#164529] font-serif border-b border-[#164529]/15">
+                      <th className="py-2.5 px-3 font-bold w-8 text-center">#</th>
+                      <th className="py-2.5 px-3 font-bold min-w-[140px]">Medication Name</th>
+                      <th className="py-2.5 px-3 font-bold min-w-[110px]">Strength &amp; Form</th>
+                      <th className="py-2.5 px-3 font-bold w-16">Qty</th>
+                      <th className="py-2.5 px-3 font-bold min-w-[140px]">Sig (Directions)</th>
+                      <th className="py-2.5 px-3 font-bold w-24">Legibility</th>
+                      <th className="py-2.5 px-3 font-bold min-w-[170px]">Dosage Safety Triage</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#164529]/10">
+                    {extractedData.medications.map((med, idx) => {
+                      const isFlagged = med.dosage_safety_flag === 'review_recommended';
+                      return (
+                        <tr
+                          key={idx}
+                          className={`hover:bg-[#fcfaf4] transition-colors ${
+                            isFlagged ? 'bg-[#fff9f9]' : idx % 2 === 0 ? 'bg-[#ffffff]' : 'bg-[#faf7ee]'
+                          }`}
+                        >
+                          <td className="py-3 px-3 text-center text-[#717971] font-mono text-[11px]">
+                            {idx + 1}
+                          </td>
+                          <td className="py-3 px-3">
+                            <span
+                              className={`font-semibold ${
+                                med.legibility === 'illegible'
+                                  ? 'text-[#ba1a1a] italic'
+                                  : 'text-[#1d1c13]'
+                              }`}
+                            >
+                              {med.medication_name || '[Unreadable Name]'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-3 text-[#414942]">
+                            <div>{med.strength || '—'}</div>
+                            {med.dosage_form && (
+                              <div className="text-[10px] text-[#717971]">{med.dosage_form}</div>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 text-[#414942] font-mono text-[11px]">
+                            {med.quantity || '—'}
+                          </td>
+                          <td className="py-3 px-3 font-mono text-[11px] text-[#164529] font-medium bg-[#164529]/[0.02]">
+                            {med.sig || '—'}
+                          </td>
+                          <td className="py-3 px-3">
+                            {renderLegibilityBadge(med.legibility)}
+                          </td>
+                          <td className="py-3 px-3">
+                            {renderSafetyFlagBadge(med.dosage_safety_flag, med.dosage_safety_reason)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Clinical Triage Disclaimer Banner */}
+          <div className="p-3 bg-[#ede8d9]/50 rounded-xl border border-[#164529]/10 flex items-start gap-2 text-[11px] text-[#555f56]">
+            <ShieldCheck className="w-4 h-4 text-[#164529] shrink-0 mt-0.5" />
+            <p>
+              <strong className="text-[#164529]">Clinical Safety Notice:</strong> This dosage safety
+              comparison is an automated triage aid comparing strength/quantity against stated patient
+              weight and age. It is NOT clinical advice. A licensed pharmacist verifies all items prior to
+              dispensing.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Primary Action Buttons (Rendered below table) */}
       <div className="space-y-3 pt-2">
         <button
           type="button"
           onClick={handleSubmit}
-          className="w-full min-h-[50px] bg-[#164529] hover:bg-[#2f5d3f] text-[#ffffff] rounded-full px-6 py-3.5 flex items-center justify-center gap-2 shadow-md active:scale-[0.98] transition-all cursor-pointer font-serif font-semibold text-sm"
+          disabled={scanning}
+          className="w-full min-h-[52px] bg-[#164529] hover:bg-[#2f5d3f] text-[#ffffff] rounded-full px-6 py-3.5 flex items-center justify-center gap-2 shadow-md active:scale-[0.98] transition-all cursor-pointer font-serif font-semibold text-sm disabled:opacity-60"
         >
           {submitted ? (
-            <span>Prescription Transmitted! Redirecting...</span>
+            <span>Prescription Transmitted! Redirecting to Queue...</span>
           ) : (
             <>
-              <span>Submit Prescription ↵ Enter</span>
+              <span>
+                {extractedData
+                  ? `Submit Verified Prescription (${extractedData.medications.length} Meds) ↵ Enter`
+                  : 'Submit Prescription ↵ Enter'}
+              </span>
               <ArrowRight className="w-4 h-4" />
             </>
           )}

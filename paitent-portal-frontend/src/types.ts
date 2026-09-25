@@ -59,10 +59,16 @@ export interface PrescriptionOrder {
   };
 }
 
+import { ExtractedPrescription, ExtractedMedication } from './types/prescriptionExtraction';
+export type { ExtractedPrescription, ExtractedMedication };
+
 export interface AttachedDoc {
   fileName: string;
   fileSize: string;
   fileType: string;
   uploadTime: string;
   previewUrl?: string;
+  file?: File;
+  extractedPrescription?: ExtractedPrescription;
 }
+
