@@ -168,6 +168,7 @@ export async function extractPrescriptionWithGroq(
             ],
           },
         ],
+        max_tokens: 900,
         response_format: {
           type: 'json_schema',
           json_schema: {
@@ -210,6 +211,7 @@ export async function extractPrescriptionWithGroq(
               ],
             },
           ],
+          max_tokens: 900,
           response_format: { type: 'json_object' },
         });
 

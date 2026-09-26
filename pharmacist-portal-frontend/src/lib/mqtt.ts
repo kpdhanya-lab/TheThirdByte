@@ -27,6 +27,7 @@ const options: IClientOptions = {
   reconnectPeriod: 3000, // Automatically retry connection every 3 seconds if disconnected
   connectTimeout: 30 * 1000, // 30 seconds connection timeout
   keepalive: 60,
+  queueQoSZero: true, // Queue QoS 0 messages until connected
   ...(username ? { username } : {}),
   ...(password ? { password } : {}),
 };

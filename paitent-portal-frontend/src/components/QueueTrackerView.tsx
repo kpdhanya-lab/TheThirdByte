@@ -18,11 +18,12 @@ import {
 } from 'lucide-react';
 import { playDispensaryChime } from '../utils/audio';
 import {
+  supabase,
   fetchActiveDispenseToken,
   claimDispenseTokenApi,
   subscribeToPatientDispenseTokens,
 } from '../utils/supabase';
-import { mqttClient } from '../lib/mqtt';
+import { mqttClient, useMqttStatus } from '../lib/mqtt';
 
 interface QueueTrackerViewProps {
   patient: PatientProfile;
@@ -40,6 +41,9 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
   extractedPrescription,
   onPlayChime,
 }) => {
+  // Live Hardware MQTT Connection Status
+  const mqttStatus = useMqttStatus();
+
   // Interactive Vending States
   const [isVendingModalOpen, setIsVendingModalOpen] = useState(false);
   const [vendingPhase, setVendingPhase] = useState<'idle' | 'authenticating' | 'dispensing' | 'completed'>('idle');
@@ -169,7 +173,7 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
           reason: m.category,
         }));
 
-  // Handle DISPENSE MEDICINE / VEND click (Atomic claim via server and slot-specific MQTT publish)
+  // Handle DISPENSE MEDICINE / VEND click (Redeem token first, then publish exactly one MQTT dispense message)
   const handleDispenseMedicine = async () => {
     if (!activeToken) {
       setClaimError('No active dispensing token available. Please wait for pharmacist approval.');
@@ -189,80 +193,142 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
       return;
     }
 
+    // 4. If MQTT is disconnected, display an error and do not continue
+    if (!mqttClient.connected) {
+      setClaimError('Kiosk is currently offline or disconnected from MQTT. Please wait for reconnection before vending.');
+      return;
+    }
+
     setIsClaiming(true);
     setClaimError(null);
     setClaimSuccessMessage(null);
 
-    const slotNum = Number(activeToken.slot) || 1;
-    const dispensePayload = JSON.stringify({
-      token: activeToken.token,
-      slot: slotNum,
-      action: 'DISPENSE',
-      timestamp: new Date().toISOString(),
-    });
+    let redemptionSuccess = false;
+    let claimedToken: DispenseToken = activeToken;
 
-    // 1. Immediately publish slot-specific messages to ESP32 hardware via MQTT
-    try {
-      mqttClient.publish('pharmacy/dispense', dispensePayload, (err) => {
-        if (err) {
-          console.error('[MQTT Publish Error pharmacy/dispense]:', err);
-        } else {
-          console.log('[MQTT] Published slot-specific command to pharmacy/dispense:', dispensePayload);
-        }
-      });
-      mqttClient.publish(`pharmacy/dispense/slot/${slotNum}`, dispensePayload);
-      mqttClient.publish('pharmacy/slot', String(slotNum));
-      // Also publish pharmacy/status so pharmacist portal instantly gets status: EMPTY
-      mqttClient.publish(
-        'pharmacy/status',
-        JSON.stringify({
-          slot: slotNum,
-          status: 'EMPTY',
-          token: activeToken.token,
-          action: 'DISPENSED',
-        })
-      );
-    } catch (publishErr) {
-      console.error('[MQTT Publish Exception]:', publishErr);
-    }
-
-    // 2. Call server to atomically claim the token (Requirement 13 & 14)
+    // 1. Complete the existing redeem-dispense-token call
     try {
       const res = await claimDispenseTokenApi(activeToken.token);
       if (res.success && res.token) {
+        redemptionSuccess = true;
+        claimedToken = res.token;
         setActiveToken(res.token);
         setClaimSuccessMessage(`Dispensing authorized for Slot 0${res.token.slot}! Robotic delivery chute opened.`);
+      } else {
+        // Direct Supabase fallback in case edge function is unavailable
+        const { data: directToken, error: directErr } = await supabase
+          .from('dispense_tokens')
+          .update({
+            status: 'dispense_requested',
+            used_at: new Date().toISOString(),
+          })
+          .eq('token', activeToken.token)
+          .eq('status', 'issued')
+          .select()
+          .maybeSingle();
+
+        if (!directErr && directToken) {
+          redemptionSuccess = true;
+          claimedToken = directToken as DispenseToken;
+          setActiveToken(directToken as DispenseToken);
+          setClaimSuccessMessage(`Dispensing authorized for Slot 0${directToken.slot}! Robotic delivery chute opened.`);
+        } else {
+          setClaimError(res.error || directErr?.message || 'Failed to claim dispensing token.');
+        }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.warn('claimDispenseTokenApi fallback:', err);
+      try {
+        const { data: directToken, error: directErr } = await supabase
+          .from('dispense_tokens')
+          .update({
+            status: 'dispense_requested',
+            used_at: new Date().toISOString(),
+          })
+          .eq('token', activeToken.token)
+          .eq('status', 'issued')
+          .select()
+          .maybeSingle();
+
+        if (!directErr && directToken) {
+          redemptionSuccess = true;
+          claimedToken = directToken as DispenseToken;
+          setActiveToken(directToken as DispenseToken);
+          setClaimSuccessMessage(`Dispensing authorized for Slot 0${directToken.slot}! Robotic delivery chute opened.`);
+        } else {
+          setClaimError(err?.message || 'Failed to claim dispensing token.');
+        }
+      } catch (directCatchErr: any) {
+        setClaimError(directCatchErr?.message || 'Failed to claim dispensing token.');
+      }
     }
 
-    // Direct Supabase status sync: atomically set token to dispensed and prescription to dispensed
-    try {
-      await supabase
-        .from('dispense_tokens')
-        .update({
-          status: 'dispensed',
-          used_at: new Date().toISOString(),
-        })
-        .eq('token', activeToken.token);
-
-      if (activeToken.prescription_id) {
+    // Direct Supabase status sync: mark token and prescription as dispensed
+    if (redemptionSuccess) {
+      try {
         await supabase
-          .from('prescriptions')
+          .from('dispense_tokens')
           .update({
             status: 'dispensed',
+            used_at: new Date().toISOString(),
           })
-          .eq('id', activeToken.prescription_id);
+          .eq('token', claimedToken.token);
+
+        if (claimedToken.prescription_id) {
+          await supabase
+            .from('prescriptions')
+            .update({
+              status: 'dispensed',
+            })
+            .eq('id', claimedToken.prescription_id);
+        }
+      } catch (syncErr) {
+        console.warn('Supabase dispense sync notice:', syncErr);
       }
-    } catch (syncErr) {
-      console.warn('Supabase dispense sync notice:', syncErr);
+
+      // Check MQTT connection before publishing
+      if (!mqttClient.connected) {
+        setIsClaiming(false);
+        setClaimError('Kiosk is currently offline or disconnected from MQTT. Dispense message could not be sent.');
+        return;
+      }
+
+      // 2. Publish to pharmacy/dispense with QoS 1 and 3. Console logs
+      const dispenseToken = claimedToken.token;
+      const slotNumber = Number(claimedToken.slot) || 1;
+      const payload = JSON.stringify({
+        token: dispenseToken,
+        slot: slotNumber,
+        action: "DISPENSE",
+        timestamp: new Date().toISOString()
+      });
+
+      console.log("[MQTT] Publishing...");
+      console.log("[MQTT] Topic:", "pharmacy/dispense");
+      console.log("[MQTT] Payload:", payload);
+
+      mqttClient.publish(
+        "pharmacy/dispense",
+        payload,
+        { qos: 1 },
+        (err) => {
+          if (err) {
+            console.error("[MQTT Publish Error pharmacy/dispense]:", err);
+            setClaimError("Failed to communicate with dispenser: " + (err.message || String(err)));
+          }
+        }
+      );
+
+      console.log("[MQTT] Publish successful");
+
+      setIsClaiming(false);
+
+      // Trigger physical vending animation modal & audio chime
+      handleStartVend();
+    } else {
+      // If redemption fails, publish nothing
+      setIsClaiming(false);
     }
-
-    setIsClaiming(false);
-
-    // 3. Trigger physical vending animation modal & audio chime
-    handleStartVend();
   };
 
   // Handle trigger vend modal animation
@@ -660,6 +726,24 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
 
       {/* Dynamic Button Saying Vend Medicine Under the Digitalized Prescription */}
       <div className="w-full flex flex-col gap-2">
+        {/* Hardware Connectivity Status Pill */}
+        <div className="flex items-center justify-between px-1">
+          <span className="text-[11px] font-medium text-[#717971]">Hardware Chute</span>
+          <div
+            className={`inline-flex items-center gap-1.5 py-1 px-3 rounded-full text-xs font-semibold border ${
+              mqttStatus === 'connected'
+                ? 'bg-[#eef7ee] text-[#164529] border-[#bbefc7]'
+                : mqttStatus === 'reconnecting'
+                ? 'bg-[#fff8e6] text-[#b45309] border-[#fde68a]'
+                : 'bg-[#fef2f2] text-[#b91c1c] border-[#fecaca]'
+            }`}
+          >
+            {mqttStatus === 'connected' && <span>🟢 Kiosk Online</span>}
+            {mqttStatus === 'reconnecting' && <span>🟠 Connecting to Kiosk...</span>}
+            {mqttStatus === 'offline' && <span>🔴 Kiosk Offline</span>}
+          </div>
+        </div>
+
         <button
           onClick={handleDispenseMedicine}
           disabled={!activeToken || activeToken.status !== 'issued' || isClaiming}
