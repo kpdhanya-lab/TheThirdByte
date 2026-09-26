@@ -78,6 +78,29 @@ function dispenseTokenPharmacistPlugin(): Plugin {
           return;
         }
 
+        // 4. Complete Dispense Token (Called upon MQTT ESP32 status EMPTY)
+        if (url === '/api/dispense-tokens/complete' && req.method === 'POST') {
+          const chunks: Buffer[] = [];
+          req.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+          req.on('end', async () => {
+            try {
+              const body = Buffer.concat(chunks).toString('utf8');
+              const { token, slot } = JSON.parse(body);
+              const { completeDispenseToken } = await server.ssrLoadModule('./src/server/dispenseTokenService.ts');
+              const result = await completeDispenseToken({ token, slot });
+              res.statusCode = result.status || 200;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify(result));
+            } catch (err: any) {
+              console.error('[API /api/dispense-tokens/complete Error]:', err?.message || err);
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ success: false, error: err?.message || 'Failed to complete token' }));
+            }
+          });
+          return;
+        }
+
         next();
       });
     },

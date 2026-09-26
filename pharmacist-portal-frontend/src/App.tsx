@@ -18,7 +18,9 @@ import {
   fetchHospitalPrescriptions,
   subscribeToHospitalPrescriptions,
   updatePrescriptionStatusInSupabase,
+  syncDispenseCompletionToSupabase,
 } from './utils/supabase';
+import { subscribeToPharmacyStatus, ESP32StatusPayload } from './lib/mqttStatusListener';
 
 // Helper to parse route and query params from hash
 function parseHash(hash: string) {
@@ -42,22 +44,127 @@ export default function App() {
   const [showNewRxModal, setShowNewRxModal] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
+  // Automated Kiosk Slots State & Realtime MQTT Status
+  const [slotStatuses, setSlotStatuses] = useState<
+    Record<1 | 2 | 3, { status: 'EMPTY' | 'OCCUPIED'; isAvailable: boolean; token?: string }>
+  >({
+    1: { status: 'EMPTY', isAvailable: true },
+    2: { status: 'EMPTY', isAvailable: true },
+    3: { status: 'EMPTY', isAvailable: true },
+  });
+  const [dispensedAlert, setDispensedAlert] = useState<{
+    slot: number;
+    token: string;
+    timestamp: string;
+  } | null>(null);
+
+  const handleUpdateSlotStatus = useCallback(
+    (slot: 1 | 2 | 3, status: 'EMPTY' | 'OCCUPIED', isAvailable: boolean, token?: string) => {
+      setSlotStatuses((prev) => ({
+        ...prev,
+        [slot]: { status, isAvailable, token },
+      }));
+    },
+    []
+  );
+
+  // Connect to ESP32 / HiveMQ status listener on pharmacy/status
+  useEffect(() => {
+    const unsubscribe = subscribeToPharmacyStatus(async (payload: ESP32StatusPayload) => {
+      const slotNum = (Number(payload.slot) || 1) as 1 | 2 | 3;
+      const statusUpper = String(payload.status || '').toUpperCase();
+
+      if ([1, 2, 3].includes(slotNum) && statusUpper === 'EMPTY') {
+        // 1. Mark Slot as EMPTY & make it available for the next prescription immediately
+        setSlotStatuses((prev) => ({
+          ...prev,
+          [slotNum]: {
+            status: 'EMPTY',
+            isAvailable: true,
+            token: undefined, // Cleared so slot becomes available for next prescription
+          },
+        }));
+
+        // 2. Display green "Medicine Dispensed" badge immediately
+        setDispensedAlert({
+          slot: slotNum,
+          token: payload.token,
+          timestamp: new Date().toLocaleTimeString(),
+        });
+
+        // 3. Mark the prescription for this token / slot as Dispensed immediately in local state (no page reload)
+        setPrescriptions((prev) =>
+          prev.map((rx) => {
+            const rxToken =
+              typeof rx.dispenseToken === 'object'
+                ? rx.dispenseToken?.token
+                : rx.dispenseToken;
+            const matchesToken = Boolean(
+              payload.token &&
+              rxToken &&
+              rxToken.trim().toUpperCase() === payload.token.trim().toUpperCase()
+            );
+            const matchesSlot =
+              rx.vendingSlot === `Slot 0${slotNum}` || rx.vendingSlot === `Slot ${slotNum}`;
+
+            if (matchesToken || (matchesSlot && rx.status !== 'Dispensed')) {
+              return {
+                ...rx,
+                status: 'Dispensed',
+                verifiedAt: rx.verifiedAt || new Date().toISOString().replace('T', ' ').slice(0, 19),
+                dispenseToken:
+                  typeof rx.dispenseToken === 'object' && rx.dispenseToken
+                    ? {
+                        ...rx.dispenseToken,
+                        status: 'dispensed',
+                        used_at: new Date().toISOString(),
+                      }
+                    : rx.dispenseToken,
+              };
+            }
+            return rx;
+          })
+        );
+
+        // 4. Synchronize dispensing completion with Supabase in background (non-polling fire-and-forget)
+        try {
+          await syncDispenseCompletionToSupabase({
+            token: payload.token,
+            slot: slotNum,
+          });
+        } catch (syncErr) {
+          console.warn('[MQTT HiveMQ] Background Supabase sync notice:', syncErr);
+        }
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
   // Sync route and params from window hash
   useEffect(() => {
     const handleHashChange = () => {
       const { path, rx } = parseHash(window.location.hash);
-      if (!path) {
-        // Default route
-        setCurrentRoute(isLoggedIn ? 'dashboard' : 'login');
+      if (!isLoggedIn) {
+        setCurrentRoute('login');
       } else {
-        setCurrentRoute(path);
+        if (!path || path === 'login') {
+          setCurrentRoute('dashboard');
+          if (window.location.hash !== '#/dashboard') {
+            window.location.hash = '#/dashboard';
+          }
+        } else {
+          setCurrentRoute(path);
+        }
       }
       if (rx) {
         setSelectedRxNumber(rx);
       }
     };
 
-    // Initial check on mount
+    // Initial check on mount or when login status toggles
     handleHashChange();
 
     window.addEventListener('hashchange', handleHashChange);
@@ -140,21 +247,25 @@ export default function App() {
     } else {
       // Fallback hierarchy based on intended pharmacist workflow
       if (currentRoute === 'transactions') handleNavigate('dashboard');
-      else if (currentRoute === 'dispensing-complete') handleNavigate('dispensing-monitor', selectedRxNumber);
-      else if (currentRoute === 'dispensing-monitor') handleNavigate('approved-ready', selectedRxNumber);
-      else if (currentRoute === 'approved-ready') handleNavigate('prescription-review', selectedRxNumber);
+      else if (
+        currentRoute === 'dispensing-complete' ||
+        currentRoute === 'dispensing-monitor' ||
+        currentRoute === 'approved-ready'
+      )
+        handleNavigate('dashboard');
       else if (currentRoute === 'prescription-review') handleNavigate('prescriptions');
       else if (currentRoute === 'prescriptions' || currentRoute === 'pending-prescriptions') handleNavigate('dashboard');
       else if (currentRoute === 'interactions') handleNavigate('dashboard');
       else handleNavigate('dashboard');
     }
-  }, [currentRoute, handleNavigate, selectedRxNumber]);
+  }, [currentRoute, handleNavigate]);
 
   // Login handler
   const handleLoginSuccess = (pharmacist: Pharmacist) => {
     setCurrentPharmacist(pharmacist);
     setIsLoggedIn(true);
-    handleNavigate('dashboard');
+    setCurrentRoute('dashboard');
+    window.location.hash = '#/dashboard';
   };
 
   // Lock station / logout handler
@@ -232,14 +343,17 @@ export default function App() {
                 onLoginSuccess={handleLoginSuccess}
                 onExploreDemo={() => {
                   setIsLoggedIn(true);
-                  handleNavigate('dashboard');
+                  setCurrentRoute('dashboard');
+                  window.location.hash = '#/dashboard';
                 }}
               />
             </div>
           ) : (
             <div className="w-full">
-              {/* WORKFLOW 1: DASHBOARD */}
-              {currentRoute === 'dashboard' && (
+              {/* WORKFLOW 1: DASHBOARD (Default view when logged in) */}
+              {(currentRoute === 'dashboard' ||
+                currentRoute === 'login' ||
+                !['prescriptions', 'pending-prescriptions', 'prescription-review', 'dispensing-complete', 'approved-ready', 'dispensing-monitor', 'dispensing', 'transactions', 'audit', 'interactions'].includes(currentRoute)) && (
                 <DispensingBay
                   prescriptions={prescriptions}
                   currentPharmacist={currentPharmacist}
@@ -248,6 +362,10 @@ export default function App() {
                   workflowStep="dashboard"
                   onNavigate={handleNavigate}
                   onRecordTransaction={handleRecordTransaction}
+                  slotStatuses={slotStatuses}
+                  onUpdateSlotStatus={handleUpdateSlotStatus}
+                  dispensedAlert={dispensedAlert}
+                  onDismissAlert={() => setDispensedAlert(null)}
                 />
               )}
 
@@ -262,6 +380,8 @@ export default function App() {
                   }}
                   onOpenNewRxModal={() => setShowNewRxModal(true)}
                   onBack={() => handleNavigate('dashboard')}
+                  dispensedAlert={dispensedAlert}
+                  onDismissAlert={() => setDispensedAlert(null)}
                 />
               )}
 
@@ -277,42 +397,18 @@ export default function App() {
                   onNavigate={handleNavigate}
                   onBack={() => handleNavigate('prescriptions')}
                   onRecordTransaction={handleRecordTransaction}
+                  slotStatuses={slotStatuses}
+                  onUpdateSlotStatus={handleUpdateSlotStatus}
+                  dispensedAlert={dispensedAlert}
+                  onDismissAlert={() => setDispensedAlert(null)}
                 />
               )}
 
-              {/* WORKFLOW 4: APPROVED / READY FOR DISPENSE */}
-              {currentRoute === 'approved-ready' && (
-                <DispensingBay
-                  prescriptions={prescriptions}
-                  currentPharmacist={currentPharmacist}
-                  onUpdatePrescription={handleUpdatePrescription}
-                  onOpenNewRxModal={() => setShowNewRxModal(true)}
-                  workflowStep="ready"
-                  targetRxNumber={selectedRxNumber}
-                  onNavigate={handleNavigate}
-                  onBack={() => handleNavigate('prescription-review', selectedRxNumber)}
-                  onRecordTransaction={handleRecordTransaction}
-                />
-              )}
-
-              {/* WORKFLOW 5: DISPENSING MONITOR */}
-              {(currentRoute === 'dispensing-monitor' ||
+              {/* WORKFLOW: DISPENSING COMPLETE & YET TO VEND (IMAGE 3) */}
+              {(currentRoute === 'dispensing-complete' ||
+                currentRoute === 'approved-ready' ||
+                currentRoute === 'dispensing-monitor' ||
                 currentRoute === 'dispensing') && (
-                <DispensingBay
-                  prescriptions={prescriptions}
-                  currentPharmacist={currentPharmacist}
-                  onUpdatePrescription={handleUpdatePrescription}
-                  onOpenNewRxModal={() => setShowNewRxModal(true)}
-                  workflowStep="dispensing-monitor"
-                  targetRxNumber={selectedRxNumber}
-                  onNavigate={handleNavigate}
-                  onBack={() => handleNavigate('approved-ready', selectedRxNumber)}
-                  onRecordTransaction={handleRecordTransaction}
-                />
-              )}
-
-              {/* WORKFLOW 6: DISPENSING COMPLETE */}
-              {currentRoute === 'dispensing-complete' && (
                 <DispensingBay
                   prescriptions={prescriptions}
                   currentPharmacist={currentPharmacist}
@@ -321,8 +417,12 @@ export default function App() {
                   workflowStep="dispensing-complete"
                   targetRxNumber={selectedRxNumber}
                   onNavigate={handleNavigate}
-                  onBack={() => handleNavigate('dispensing-monitor', selectedRxNumber)}
+                  onBack={() => handleNavigate('dashboard')}
                   onRecordTransaction={handleRecordTransaction}
+                  slotStatuses={slotStatuses}
+                  onUpdateSlotStatus={handleUpdateSlotStatus}
+                  dispensedAlert={dispensedAlert}
+                  onDismissAlert={() => setDispensedAlert(null)}
                 />
               )}
 

@@ -296,21 +296,59 @@ export function getPatientSessionToken(): string | null {
  * Fetch the active dispensing token for the authenticated patient from the server.
  * Requirement 10: Display the active token in the patient portal.
  */
-export async function fetchActiveDispenseToken(): Promise<{ success: boolean; token?: DispenseToken | null; error?: string }> {
+export async function fetchActiveDispenseToken(targetPrescriptionId?: string): Promise<{ success: boolean; token?: DispenseToken | null; error?: string }> {
   try {
-    const sessionToken = getPatientSessionToken();
-    const headers: Record<string, string> = {};
-    if (sessionToken) {
-      headers['Authorization'] = `Bearer ${sessionToken}`;
+    const rxId =
+      targetPrescriptionId ||
+      (typeof window !== 'undefined'
+        ? sessionStorage.getItem('active_prescription_id') || localStorage.getItem('active_prescription_id')
+        : null);
+
+    // 1. If we have a specific target prescription ID:
+    if (rxId) {
+      const { data: dbTokens } = await supabase
+        .from('dispense_tokens')
+        .select('*')
+        .eq('prescription_id', rxId)
+        .eq('status', 'issued')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (dbTokens && dbTokens.length > 0) {
+        return { success: true, token: dbTokens[0] as DispenseToken };
+      }
+      return { success: true, token: null };
     }
 
-    const res = await fetch('/api/dispense-tokens/active', {
-      method: 'GET',
-      headers,
-    });
+    // 2. If no prescription ID is specified, check the latest prescription in the system
+    const { data: latestRxs } = await supabase
+      .from('prescriptions')
+      .select('id, status')
+      .order('created_at', { ascending: false })
+      .limit(1);
 
-    const data = await res.json();
-    return data;
+    if (latestRxs && latestRxs.length > 0) {
+      const latestRx = latestRxs[0];
+      // If the latest prescription is still pending review, pharmacist has NOT approved yet!
+      if (latestRx.status === 'pending_review' || latestRx.status === 'pending') {
+        return { success: true, token: null };
+      }
+
+      // If approved, check if an issued token exists for this prescription
+      const { data: dbTokens } = await supabase
+        .from('dispense_tokens')
+        .select('*')
+        .eq('prescription_id', latestRx.id)
+        .eq('status', 'issued')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (dbTokens && dbTokens.length > 0) {
+        return { success: true, token: dbTokens[0] as DispenseToken };
+      }
+    }
+
+    return { success: true, token: null };
   } catch (err: any) {
     console.error('[fetchActiveDispenseToken Error]:', err);
     return { success: false, error: err?.message || 'Failed to fetch active token.' };
@@ -385,7 +423,7 @@ export function subscribeToPatientDispenseTokens(
   onTokenChange: (token: DispenseToken) => void
 ) {
   const channel = supabase
-    .channel('patient-realtime-tokens')
+    .channel('patient-realtime-tokens-' + Math.random().toString(36).substring(2, 9))
     .on(
       'postgres_changes',
       {
@@ -395,8 +433,10 @@ export function subscribeToPatientDispenseTokens(
       },
       (payload) => {
         const row: any = payload.new || payload.old;
-        if (row && (!patientId || row.patient_id === patientId)) {
-          onTokenChange(row as DispenseToken);
+        if (row) {
+          if (!patientId || row.patient_id === patientId || row.status === 'issued' || row.status === 'dispensed') {
+            onTokenChange(row as DispenseToken);
+          }
         }
       }
     )

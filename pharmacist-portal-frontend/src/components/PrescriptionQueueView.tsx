@@ -6,6 +6,8 @@ interface PrescriptionQueueViewProps {
   onSelectRx: (rx: Prescription) => void;
   onOpenNewRxModal: () => void;
   onBack?: () => void;
+  dispensedAlert?: { slot: number; token: string; timestamp: string } | null;
+  onDismissAlert?: () => void;
 }
 
 export const PrescriptionQueueView: React.FC<PrescriptionQueueViewProps> = ({
@@ -13,6 +15,8 @@ export const PrescriptionQueueView: React.FC<PrescriptionQueueViewProps> = ({
   onSelectRx,
   onOpenNewRxModal,
   onBack,
+  dispensedAlert,
+  onDismissAlert,
 }) => {
   const [activeFilter, setActiveFilter] = useState<'ALL' | 'Pending Review' | 'Ready for Dispense' | 'Dispensed' | 'STAT'>('ALL');
   const [searchTerm, setSearchTerm] = useState('');
@@ -68,6 +72,42 @@ export const PrescriptionQueueView: React.FC<PrescriptionQueueViewProps> = ({
           <span>New e-Prescription Order</span>
         </button>
       </div>
+
+      {/* Green Medicine Dispensed Real-Time Indicator Banner */}
+      {dispensedAlert && (
+        <div className="mt-4 p-4 bg-[#E8F5E9] border-2 border-[#2E7D32] rounded-2xl flex items-center justify-between text-[#1B5E20] text-xs shadow-md animate-fade-in">
+          <div className="flex items-center gap-3">
+            <span className="w-3 h-3 rounded-full bg-[#2E7D32] animate-ping shrink-0" />
+            <span className="material-symbols-outlined text-[24px] text-[#2E7D32] shrink-0">check_circle</span>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2.5">
+              <span className="px-2.5 py-0.5 rounded-full bg-[#2E7D32] text-white font-bold text-xs uppercase tracking-wide flex items-center gap-1">
+                <span className="material-symbols-outlined text-[13px]">done_all</span>
+                Medicine Dispensed
+              </span>
+              <span className="text-[#1B5E20] font-semibold text-xs">
+                Slot {dispensedAlert.slot} → <strong className="font-mono text-[#2E7D32]">EMPTY</strong> (Marked Available)
+              </span>
+              {dispensedAlert.token && (
+                <span className="font-mono text-[11px] text-[#1B5E20]/80 bg-white/70 px-2 py-0.5 rounded-md border border-[#2E7D32]/30">
+                  Token: {dispensedAlert.token}
+                </span>
+              )}
+              <span className="text-[10px] text-[#2E7D32]/70 font-mono">
+                {dispensedAlert.timestamp}
+              </span>
+            </div>
+          </div>
+          {onDismissAlert && (
+            <button
+              onClick={onDismissAlert}
+              className="text-[#2E7D32] hover:bg-[#C8E6C9] p-1 rounded-xl transition-colors cursor-pointer"
+              title="Dismiss notification"
+            >
+              <span className="material-symbols-outlined text-[18px]">close</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Filter Chips & Search Bar */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mt-6">

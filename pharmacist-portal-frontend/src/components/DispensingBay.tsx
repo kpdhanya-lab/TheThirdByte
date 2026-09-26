@@ -5,7 +5,9 @@ import {
   requestGenerateDispenseToken,
   fetchDispenseTokenForPrescription,
   updatePrescriptionStatusInSupabase,
+  syncDispenseCompletionToSupabase,
 } from '../utils/supabase';
+import { subscribeToPharmacyStatus, ESP32StatusPayload } from '../lib/mqttStatusListener';
 
 interface DispensingBayProps {
   prescriptions: Prescription[];
@@ -17,6 +19,10 @@ interface DispensingBayProps {
   onNavigate?: (route: string, rxNumber?: string) => void;
   onBack?: () => void;
   onRecordTransaction?: (rx: Prescription, details: string) => void;
+  slotStatuses?: Record<1 | 2 | 3, { status: 'EMPTY' | 'OCCUPIED'; isAvailable: boolean; token?: string }>;
+  onUpdateSlotStatus?: (slot: 1 | 2 | 3, status: 'EMPTY' | 'OCCUPIED', isAvailable: boolean, token?: string) => void;
+  dispensedAlert?: { slot: number; token: string; timestamp: string } | null;
+  onDismissAlert?: () => void;
 }
 
 export const DispensingBay: React.FC<DispensingBayProps> = ({
@@ -29,12 +35,90 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
   onNavigate,
   onBack,
   onRecordTransaction,
+  slotStatuses,
+  onUpdateSlotStatus,
+  dispensedAlert,
+  onDismissAlert,
 }) => {
   const [selectedRxNumber, setSelectedRxNumber] = useState<string>(
     targetRxNumber || prescriptions[0]?.rxNumber || ''
   );
+
+  // Sync selected prescription if targetRxNumber changes
+  useEffect(() => {
+    if (targetRxNumber && prescriptions.some((p) => p.rxNumber === targetRxNumber)) {
+      setSelectedRxNumber(targetRxNumber);
+    }
+  }, [targetRxNumber, prescriptions]);
+
+  const selectedRx =
+    prescriptions.find((p) => p.rxNumber === selectedRxNumber) || prescriptions[0];
+
   const [filterPriority, setFilterPriority] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Fallback internal slot states in case props are omitted
+  const [internalSlotStatuses, setInternalSlotStatuses] = useState<
+    Record<1 | 2 | 3, { status: 'EMPTY' | 'OCCUPIED'; isAvailable: boolean; token?: string }>
+  >({
+    1: { status: 'EMPTY', isAvailable: true },
+    2: { status: 'EMPTY', isAvailable: true },
+    3: { status: 'EMPTY', isAvailable: true },
+  });
+  const currentSlotStatuses = slotStatuses || internalSlotStatuses;
+
+  const [internalAlert, setInternalAlert] = useState<{
+    slot: number;
+    token: string;
+    timestamp: string;
+  } | null>(null);
+  const activeDispensedAlert = dispensedAlert !== undefined ? dispensedAlert : internalAlert;
+  const dismissAlert = onDismissAlert || (() => setInternalAlert(null));
+
+  // If slotStatuses was not passed from parent, subscribe to MQTT locally (realtime, zero-polling)
+  useEffect(() => {
+    if (!slotStatuses) {
+      const unsubscribe = subscribeToPharmacyStatus(async (payload: ESP32StatusPayload) => {
+        const slotNum = (Number(payload.slot) || 1) as 1 | 2 | 3;
+        const statusUpper = String(payload.status || '').toUpperCase();
+        if ([1, 2, 3].includes(slotNum) && statusUpper === 'EMPTY') {
+          setInternalSlotStatuses((prev) => ({
+            ...prev,
+            [slotNum]: { status: 'EMPTY', isAvailable: true, token: undefined },
+          }));
+          setInternalAlert({
+            slot: slotNum,
+            token: payload.token,
+            timestamp: new Date().toLocaleTimeString(),
+          });
+          const rxToken =
+            typeof selectedRx?.dispenseToken === 'object'
+              ? selectedRx.dispenseToken?.token
+              : selectedRx?.dispenseToken;
+          if (
+            (payload.token && rxToken === payload.token) ||
+            selectedRx?.vendingSlot === `Slot 0${slotNum}` ||
+            selectedRx?.vendingSlot === `Slot ${slotNum}`
+          ) {
+            onUpdatePrescription({
+              ...selectedRx,
+              status: 'Dispensed',
+              verifiedAt: new Date().toISOString().replace('T', ' ').slice(0, 19),
+            });
+          }
+          try {
+            await syncDispenseCompletionToSupabase({
+              token: payload.token,
+              slot: slotNum,
+            });
+          } catch (syncErr) {
+            console.warn('[MQTT DispensingBay] Background sync notice:', syncErr);
+          }
+        }
+      });
+      return () => unsubscribe();
+    }
+  }, [slotStatuses, selectedRx, onUpdatePrescription]);
 
   // Interactive Verification States
   const [scannedNdc, setScannedNdc] = useState('');
@@ -46,16 +130,6 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
   const [actionSuccessMessage, setActionSuccessMessage] = useState<string | null>(null);
   const [selectedSlot, setSelectedSlot] = useState<1 | 2 | 3>(1);
   const [isGeneratingToken, setIsGeneratingToken] = useState(false);
-
-  // Sync selected prescription if targetRxNumber changes
-  useEffect(() => {
-    if (targetRxNumber && prescriptions.some((p) => p.rxNumber === targetRxNumber)) {
-      setSelectedRxNumber(targetRxNumber);
-    }
-  }, [targetRxNumber, prescriptions]);
-
-  const selectedRx =
-    prescriptions.find((p) => p.rxNumber === selectedRxNumber) || prescriptions[0];
 
   // Filtering for queue pane
   const filteredList = prescriptions.filter((p) => {
@@ -136,8 +210,17 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
     onUpdatePrescription(updated);
     updatePrescriptionStatusInSupabase(selectedRx.rxNumber, 'Ready for Dispense');
 
+    if (onUpdateSlotStatus) {
+      onUpdateSlotStatus(selectedSlot, 'OCCUPIED', false, activeToken?.token);
+    } else {
+      setInternalSlotStatuses((prev) => ({
+        ...prev,
+        [selectedSlot]: { status: 'OCCUPIED', isAvailable: false, token: activeToken?.token },
+      }));
+    }
+
     if (onNavigate) {
-      onNavigate('approved-ready', selectedRx.rxNumber);
+      onNavigate('dispensing-complete', selectedRx.rxNumber);
     } else {
       setActionSuccessMessage(
         `Prescription ${selectedRx.rxNumber} verified, assigned to Slot 0${selectedSlot}, and dispense token created.`
@@ -179,6 +262,15 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
     };
     onUpdatePrescription(updated);
     updatePrescriptionStatusInSupabase(selectedRx.rxNumber, 'Dispensed');
+
+    if (onUpdateSlotStatus) {
+      onUpdateSlotStatus(selectedSlot, 'OCCUPIED', false, activeToken?.token);
+    } else {
+      setInternalSlotStatuses((prev) => ({
+        ...prev,
+        [selectedSlot]: { status: 'OCCUPIED', isAvailable: false, token: activeToken?.token },
+      }));
+    }
 
     if (onRecordTransaction) {
       onRecordTransaction(
@@ -241,6 +333,40 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
           </div>
         </div>
 
+        {/* Green Medicine Dispensed Real-Time Indicator Banner */}
+        {activeDispensedAlert && (
+          <div className="p-4 bg-[#E8F5E9] border-2 border-[#2E7D32] rounded-2xl flex items-center justify-between text-[#1B5E20] text-xs shadow-md animate-fade-in">
+            <div className="flex items-center gap-3">
+              <span className="w-3 h-3 rounded-full bg-[#2E7D32] animate-ping shrink-0" />
+              <span className="material-symbols-outlined text-[24px] text-[#2E7D32] shrink-0">check_circle</span>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2.5">
+                <span className="px-2.5 py-0.5 rounded-full bg-[#2E7D32] text-white font-bold text-xs uppercase tracking-wide flex items-center gap-1">
+                  <span className="material-symbols-outlined text-[13px]">done_all</span>
+                  Medicine Dispensed
+                </span>
+                <span className="text-[#1B5E20] font-semibold text-xs">
+                  Slot {activeDispensedAlert.slot} → <strong className="font-mono text-[#2E7D32]">EMPTY</strong> (Marked Available)
+                </span>
+                {activeDispensedAlert.token && (
+                  <span className="font-mono text-[11px] text-[#1B5E20]/80 bg-white/70 px-2 py-0.5 rounded-md border border-[#2E7D32]/30">
+                    Token: {activeDispensedAlert.token}
+                  </span>
+                )}
+                <span className="text-[10px] text-[#2E7D32]/70 font-mono">
+                  {activeDispensedAlert.timestamp}
+                </span>
+              </div>
+            </div>
+            <button
+              onClick={dismissAlert}
+              className="text-[#2E7D32] hover:bg-[#C8E6C9] p-1 rounded-xl transition-colors cursor-pointer"
+              title="Dismiss notification"
+            >
+              <span className="material-symbols-outlined text-[18px]">close</span>
+            </button>
+          </div>
+        )}
+
         {/* 4 KPI Metric Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div
@@ -261,7 +387,7 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
           </div>
 
           <div
-            onClick={() => onNavigate && onNavigate('dispensing-monitor', nextPending?.rxNumber)}
+            onClick={() => onNavigate && onNavigate('dispensing-complete', nextPending?.rxNumber)}
             className="bg-white p-5 rounded-2xl border border-[#E5DFCE] shadow-xs hover:border-[#2F5D3F] cursor-pointer transition-all space-y-2"
           >
             <div className="flex items-center justify-between">
@@ -273,7 +399,7 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
             <div className="font-serif text-3xl font-bold text-[#2F5D3F]">{readyCount}</div>
             <div className="text-xs text-[#1F2F4F]/80 flex items-center justify-between pt-1 border-t border-[#E5DFCE]">
               <span>Staged in Ready Bins</span>
-              <span className="text-[#2F5D3F] font-bold">Open →</span>
+              <span className="text-[#2F5D3F] font-bold">View Status →</span>
             </div>
           </div>
 
@@ -295,7 +421,7 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
           </div>
 
           <div
-            onClick={() => onNavigate && onNavigate('dispensing-monitor')}
+            onClick={() => onNavigate && onNavigate('prescriptions')}
             className="bg-white p-5 rounded-2xl border border-[#E5DFCE] shadow-xs hover:border-[#2F5D3F] cursor-pointer transition-all space-y-2"
           >
             <div className="flex items-center justify-between">
@@ -309,6 +435,75 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
               <span>Optical Tray Calibrated</span>
               <span className="text-[#2F5D3F] font-bold">Monitor →</span>
             </div>
+          </div>
+        </div>
+
+        {/* Automated Kiosk Dispenser Slots Real-time Status Card */}
+        <div className="bg-white rounded-2xl border border-[#E5DFCE] p-4 shadow-xs space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-[#2F5D3F] text-[20px]">view_carousel</span>
+              <h3 className="font-serif text-sm font-bold text-[#2F5D3F]">
+                Automated Kiosk Dispenser Slots (Live Telemetry)
+              </h3>
+            </div>
+            <span className="text-[10px] font-mono text-[#1F2F4F]/60 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-[#2E7D32] animate-pulse" />
+              MQTT Active: pharmacy/status
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {[1, 2, 3].map((slotNum) => {
+              const slotKey = slotNum as 1 | 2 | 3;
+              const slotInfo = currentSlotStatuses[slotKey] || { status: 'EMPTY', isAvailable: true };
+              const isSlotEmpty = slotInfo.status === 'EMPTY';
+              const isJustDispensed = activeDispensedAlert?.slot === slotNum;
+
+              return (
+                <div
+                  key={slotNum}
+                  className={`p-3.5 rounded-xl border flex items-center justify-between transition-all ${
+                    isJustDispensed
+                      ? 'bg-[#E8F5E9] border-[#2E7D32] ring-2 ring-[#2E7D32]/30 shadow-xs'
+                      : 'bg-[#FAF7EE] border-[#E5DFCE]'
+                  }`}
+                >
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-xs font-bold text-[#1F2F4F]">
+                        Slot 0{slotNum}
+                      </span>
+                      <span
+                        className={`text-[10px] font-bold font-mono px-2 py-0.5 rounded-md ${
+                          isSlotEmpty
+                            ? 'bg-[#2E7D32]/10 text-[#2E7D32]'
+                            : 'bg-[#D46B08]/10 text-[#D46B08]'
+                        }`}
+                      >
+                        {isSlotEmpty ? 'EMPTY' : 'OCCUPIED'}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-[#1F2F4F]/70 block">
+                      {isSlotEmpty ? 'Available for staging' : 'Medication staged in bay'}
+                    </span>
+                  </div>
+
+                  {isJustDispensed ? (
+                    <span className="px-2.5 py-1 rounded-lg bg-[#2E7D32] text-white text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 shadow-xs animate-pulse">
+                      <span className="material-symbols-outlined text-[13px]">done_all</span>
+                      Medicine Dispensed
+                    </span>
+                  ) : (
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        isSlotEmpty ? 'bg-[#2E7D32]' : 'bg-[#D46B08]'
+                      }`}
+                    />
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
 
@@ -442,166 +637,43 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
   }
 
   // -------------------------------------------------------------
-  // SCREEN 5: PRESCRIPTION APPROVED / READY FOR DISPENSING VIEW
-  // -------------------------------------------------------------
-  if (workflowStep === 'ready' && selectedRx) {
-    return (
-      <div className="w-full max-w-[1440px] mx-auto px-4 sm:px-6 py-6 text-left space-y-6">
-        {/* Top Header with Back button */}
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-5 border-b border-[#E5DFCE] gap-4">
-          <div>
-            <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-              {onBack && (
-                <button
-                  onClick={onBack}
-                  title="Go back to Prescription Review"
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-[#E5DFCE] text-xs font-semibold text-[#2F5D3F] hover:bg-[#FAF7EE] transition-colors shadow-xs cursor-pointer"
-                >
-                  <span className="material-symbols-outlined text-[16px]">arrow_back</span>
-                  <span>Back to Review</span>
-                </button>
-              )}
-              <span className="text-[10px] font-sans uppercase bg-[#E9B8C4] text-[#1F2F4F] px-2.5 py-0.5 rounded-full font-bold">
-                Prescription Approved / Ready
-              </span>
-              <span className="text-xs font-sans uppercase text-[#1F2F4F]/60 font-medium">
-                Station {currentPharmacist.station}
-              </span>
-            </div>
-            <h1 className="font-serif text-2xl sm:text-3xl font-bold text-[#2F5D3F] mt-0.5">
-              Prescription Staging & Ready Bin
-            </h1>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => onNavigate && onNavigate('prescriptions')}
-              className="px-3.5 py-2 rounded-xl bg-white border border-[#E5DFCE] text-[#2F5D3F] text-xs font-semibold hover:bg-[#FAF7EE] cursor-pointer"
-            >
-              Prescription Queue
-            </button>
-          </div>
-        </div>
-
-        {/* Staging Confirmation Card */}
-        <div className="bg-white rounded-2xl border border-[#E5DFCE] p-6 shadow-xs space-y-5">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pb-4 border-b border-[#E5DFCE]">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-2xl bg-[#E9B8C4] text-[#1F2F4F] flex items-center justify-center font-bold">
-                <span className="material-symbols-outlined text-2xl">check_circle</span>
-              </div>
-              <div>
-                <span className="text-xs font-sans uppercase text-[#2F5D3F] font-bold tracking-wider">
-                  Order Clinically Approved & Staged
-                </span>
-                <h2 className="font-serif text-xl sm:text-2xl font-bold text-[#2F5D3F]">
-                  {selectedRx.patient.name} — Rx #{selectedRx.rxNumber}
-                </h2>
-              </div>
-            </div>
-
-            <div className="bg-[#FAF7EE] px-4 py-2.5 rounded-xl border border-[#E5DFCE] text-right">
-              <span className="text-[10px] font-sans uppercase text-[#1F2F4F]/60 block font-semibold">Staging Location</span>
-              <span className="font-mono text-sm font-bold text-[#2F5D3F]">
-                {selectedRx.vendingSlot ? `Kiosk Dispenser ${selectedRx.vendingSlot}` : `Kiosk Dispenser Slot 0${selectedSlot}`}
-              </span>
-              {selectedRx.dispenseToken && (
-                <div className="mt-1 flex items-center justify-end gap-1.5">
-                  <span className="px-2 py-0.5 rounded-lg bg-[#bbefc7]/40 border border-[#164529]/20 text-[11px] font-mono font-bold text-[#164529] flex items-center gap-1">
-                    <span className="material-symbols-outlined text-[13px]">key</span>
-                    <span>{typeof selectedRx.dispenseToken === 'object' ? selectedRx.dispenseToken.token : selectedRx.dispenseToken}</span>
-                  </span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Details Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-            <div className="p-4 bg-[#FAF7EE] rounded-xl border border-[#E5DFCE] space-y-1">
-              <span className="text-[10px] font-sans uppercase text-[#1F2F4F]/60 block font-semibold">Prescribed Medication</span>
-              <span className="font-bold text-sm text-[#2F5D3F] block">
-                {selectedRx.medication.name} {selectedRx.medication.strength}
-              </span>
-              <span className="text-[#1F2F4F]/80 block">{selectedRx.medication.dosageForm}</span>
-              <span className="text-[11px] font-mono text-[#1F2F4F]/60 block">NDC: {selectedRx.medication.ndc}</span>
-            </div>
-
-            <div className="p-4 bg-[#FAF7EE] rounded-xl border border-[#E5DFCE] space-y-1">
-              <span className="text-[10px] font-sans uppercase text-[#1F2F4F]/60 block font-semibold">SIG Directions</span>
-              <p className="text-xs text-[#1F2F4F] font-medium leading-relaxed">{selectedRx.sig}</p>
-              <span className="text-[11px] text-[#1F2F4F]/60 block pt-1 font-mono">
-                Qty: {selectedRx.quantity} • Days Supply: {selectedRx.daysSupply}
-              </span>
-            </div>
-
-            <div className="p-4 bg-[#FAF7EE] rounded-xl border border-[#E5DFCE] space-y-1">
-              <span className="text-[10px] font-sans uppercase text-[#1F2F4F]/60 block font-semibold">Clinical Verification Stamp</span>
-              <span className="font-semibold text-xs text-[#1F2F4F] block">
-                Verified by: {selectedRx.verifiedBy || currentPharmacist.name}
-              </span>
-              <span className="text-[11px] text-[#1F2F4F]/60 block font-mono">
-                Timestamp: {selectedRx.verifiedAt || new Date().toLocaleString()}
-              </span>
-              <span className="text-[10px] text-[#2F5D3F] font-mono block">
-                Station: {currentPharmacist.station} • Lic: {currentPharmacist.licenseNumber}
-              </span>
-            </div>
-          </div>
-
-          {/* Next Action Callout */}
-          <div className="p-4 bg-[#FAF7EE] rounded-xl border border-[#E5DFCE] flex flex-col sm:flex-row items-center justify-between gap-4 pt-4">
-            <div className="space-y-0.5 text-center sm:text-left">
-              <h3 className="font-serif text-base font-bold text-[#2F5D3F]">
-                Proceed to Physical Dispensing Verification
-              </h3>
-              <p className="text-xs text-[#1F2F4F]/80">
-                Scan the NDC barcode on the prescription stock bottle and perform optical pill count verification.
-              </p>
-            </div>
-
-            <button
-              onClick={() => onNavigate && onNavigate('dispensing-monitor', selectedRx.rxNumber)}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#2F5D3F] hover:bg-[#234730] text-white text-xs font-bold uppercase tracking-wider shadow-xs transition-all whitespace-nowrap cursor-pointer"
-            >
-              <span>START DISPENSING</span>
-              <span className="material-symbols-outlined text-[18px]">arrow_forward</span>
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // -------------------------------------------------------------
-  // SCREEN 7: DISPENSING COMPLETE VIEW
+  // SCREEN 7: DISPENSING COMPLETE / YET TO VEND VIEW (IMAGE 3)
   // -------------------------------------------------------------
   if (workflowStep === 'dispensing-complete' && selectedRx) {
+    const isVended = selectedRx.status === 'Dispensed';
+    const assignedSlot = selectedRx.vendingSlot || `Slot 0${selectedSlot}`;
+
     return (
       <div className="w-full max-w-[1440px] mx-auto px-4 sm:px-6 py-6 text-left space-y-6">
         {/* Top Header with Back button */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between pb-5 border-b border-[#E5DFCE] gap-4">
           <div>
             <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-              {onBack && (
-                <button
-                  onClick={onBack}
-                  title="Go back to Dispensing Monitor"
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-[#E5DFCE] text-xs font-semibold text-[#2F5D3F] hover:bg-[#FAF7EE] transition-colors shadow-xs cursor-pointer"
-                >
-                  <span className="material-symbols-outlined text-[16px]">arrow_back</span>
-                  <span>Back to Dispensing Monitor</span>
-                </button>
+              <button
+                onClick={() => onNavigate ? onNavigate('dashboard') : onBack ? onBack() : undefined}
+                title="Go back to Dashboard"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-[#E5DFCE] text-xs font-semibold text-[#2F5D3F] hover:bg-[#FAF7EE] transition-colors shadow-xs cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[16px]">arrow_back</span>
+                <span>Back to Dashboard</span>
+              </button>
+              {isVended ? (
+                <span className="text-[10px] font-sans uppercase bg-[#2E7D32] text-white px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1 shadow-xs">
+                  <span className="material-symbols-outlined text-[13px]">done_all</span>
+                  Medicine Dispensed
+                </span>
+              ) : (
+                <span className="text-[10px] font-sans uppercase bg-[#FEF08A] text-[#854D0E] border border-[#EAB308]/40 px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1.5 shadow-xs">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#EAB308] animate-ping" />
+                  Yet to vend
+                </span>
               )}
-              <span className="text-[10px] font-sans uppercase bg-[#E9B8C4] text-[#1F2F4F] px-2.5 py-0.5 rounded-full font-bold">
-                Dispensing Complete
-              </span>
               <span className="text-xs font-sans uppercase text-[#1F2F4F]/60 font-medium">
-                Audit Trail Recorded
+                {isVended ? `${assignedSlot} marked EMPTY & available for next prescription` : `Staged in ${assignedSlot} • Awaiting Patient Vending`}
               </span>
             </div>
             <h1 className="font-serif text-2xl sm:text-3xl font-bold text-[#2F5D3F] mt-0.5">
-              Dispensing Finalized & Certified
+              Dispensing Finalized &amp; Certified
             </h1>
           </div>
 
@@ -614,19 +686,85 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
           </button>
         </div>
 
-        {/* Complete Certificate Card */}
+        {/* Green Medicine Dispensed Real-Time Indicator Banner */}
+        {activeDispensedAlert && (
+          <div className="p-4 bg-[#E8F5E9] border-2 border-[#2E7D32] rounded-2xl flex items-center justify-between text-[#1B5E20] text-xs shadow-md animate-fade-in">
+            <div className="flex items-center gap-3">
+              <span className="w-3 h-3 rounded-full bg-[#2E7D32] animate-ping shrink-0" />
+              <span className="material-symbols-outlined text-[24px] text-[#2E7D32] shrink-0">check_circle</span>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2.5">
+                <span className="px-2.5 py-0.5 rounded-full bg-[#2E7D32] text-white font-bold text-xs uppercase tracking-wide flex items-center gap-1">
+                  <span className="material-symbols-outlined text-[13px]">done_all</span>
+                  Medicine Dispensed
+                </span>
+                <span className="text-[#1B5E20] font-semibold text-xs">
+                  Slot {activeDispensedAlert.slot} → <strong className="font-mono text-[#2E7D32]">EMPTY</strong> (Marked Available)
+                </span>
+                {activeDispensedAlert.token && (
+                  <span className="font-mono text-[11px] text-[#1B5E20]/80 bg-white/70 px-2 py-0.5 rounded-md border border-[#2E7D32]/30">
+                    Token: {activeDispensedAlert.token}
+                  </span>
+                )}
+                <span className="text-[10px] text-[#2E7D32]/70 font-mono">
+                  {activeDispensedAlert.timestamp}
+                </span>
+              </div>
+            </div>
+            <button
+              onClick={dismissAlert}
+              className="text-[#2E7D32] hover:bg-[#C8E6C9] p-1 rounded-xl transition-colors cursor-pointer"
+              title="Dismiss notification"
+            >
+              <span className="material-symbols-outlined text-[18px]">close</span>
+            </button>
+          </div>
+        )}
+
+        {/* Complete Certificate Card (Dynamic Yet to Vend / Successfully Dispensed) */}
         <div className="bg-white rounded-2xl border border-[#E5DFCE] p-6 shadow-xs space-y-6">
           <div className="flex items-center gap-3 pb-4 border-b border-[#E5DFCE]">
-            <div className="w-12 h-12 rounded-2xl bg-[#2F5D3F] text-white flex items-center justify-center shadow-xs">
-              <span className="material-symbols-outlined text-2xl">verified</span>
+            <div
+              className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-xs transition-all ${
+                isVended ? 'bg-[#2F5D3F] text-white' : 'bg-[#FEF08A] text-[#854D0E]'
+              }`}
+            >
+              <span className="material-symbols-outlined text-2xl">
+                {isVended ? 'verified' : 'hourglass_top'}
+              </span>
             </div>
             <div>
-              <span className="text-xs font-sans uppercase text-[#2F5D3F] font-bold tracking-wider">
-                Certification Complete • Packaging Sealed
-              </span>
+              <div className="flex items-center gap-2">
+                <span
+                  className={`text-xs font-sans uppercase font-bold tracking-wider ${
+                    isVended ? 'text-[#2F5D3F]' : 'text-[#854D0E]'
+                  }`}
+                >
+                  {isVended
+                    ? 'Certification Complete • Packaging Sealed'
+                    : `Order Verified • Staged in ${assignedSlot}`}
+                </span>
+                {isVended ? (
+                  <span className="px-2.5 py-0.5 rounded-full bg-[#2E7D32] text-white font-bold text-[10px] uppercase tracking-wider flex items-center gap-1 shadow-xs">
+                    <span className="material-symbols-outlined text-[13px]">done_all</span>
+                    Medicine Dispensed
+                  </span>
+                ) : (
+                  <span className="px-2 py-0.5 rounded-full bg-[#FEF08A] border border-[#EAB308]/40 text-[#854D0E] font-bold text-[10px] uppercase tracking-wider animate-pulse flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-[#EAB308] animate-ping" />
+                    Yet to vend
+                  </span>
+                )}
+              </div>
               <h2 className="font-serif text-xl sm:text-2xl font-bold text-[#2F5D3F]">
-                Prescription {selectedRx.rxNumber} Successfully Dispensed
+                {isVended
+                  ? `Prescription ${selectedRx.rxNumber} Successfully Dispensed`
+                  : `Prescription ${selectedRx.rxNumber} — Yet to Vend`}
               </h2>
+              {!isVended && (
+                <p className="text-xs text-[#1F2F4F]/70 mt-0.5">
+                  Prescription clinically approved. Waiting for patient to tap &quot;Vend Medicine&quot; at the automated kiosk.
+                </p>
+              )}
             </div>
           </div>
 
@@ -797,10 +935,9 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
   }
 
   // -------------------------------------------------------------
-  // SCREEN 4: PRESCRIPTION REVIEW / SCREEN 6: DISPENSING MONITOR / DEFAULT BAY
+  // SCREEN 4: PRESCRIPTION REVIEW / DEFAULT BAY
   // -------------------------------------------------------------
   const isReviewMode = workflowStep === 'review';
-  const isDispensingMode = workflowStep === 'dispensing-monitor';
 
   return (
     <div className="w-full max-w-[1440px] mx-auto px-4 sm:px-6 py-6 text-left">
@@ -818,8 +955,6 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
                 <span>
                   {isReviewMode
                     ? 'Back to Pending Prescriptions'
-                    : isDispensingMode
-                    ? 'Back to Approved / Ready'
                     : 'Back to Dashboard'}
                 </span>
               </button>
@@ -830,15 +965,13 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
             </span>
             <span className="text-xs text-[#E5DFCE]">|</span>
             <span className="text-xs font-semibold text-[#1F2F4F] bg-[#E9B8C4] px-2.5 py-0.5 rounded-full">
-              {isReviewMode ? 'Prescription Review' : isDispensingMode ? 'Dispensing Monitor' : 'Dispensary Bay'}
+              {isReviewMode ? 'Prescription Review' : 'Dispensary Bay'}
             </span>
           </div>
           <h1 className="font-serif text-2xl sm:text-3xl font-bold text-[#2F5D3F] mt-0.5">
             {isReviewMode
               ? 'Prescription Review'
-              : isDispensingMode
-              ? 'Dispensing Monitor'
-              : 'Clinical Verification & Dispensing Bay'}
+              : 'Clinical Verification & Dispensary Bay'}
           </h1>
         </div>
 
@@ -856,6 +989,40 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Green Medicine Dispensed Real-Time Indicator Banner */}
+      {activeDispensedAlert && (
+        <div className="mt-4 p-4 bg-[#E8F5E9] border-2 border-[#2E7D32] rounded-2xl flex items-center justify-between text-[#1B5E20] text-xs shadow-md animate-fade-in">
+          <div className="flex items-center gap-3">
+            <span className="w-3 h-3 rounded-full bg-[#2E7D32] animate-ping shrink-0" />
+            <span className="material-symbols-outlined text-[24px] text-[#2E7D32] shrink-0">check_circle</span>
+            <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2.5">
+              <span className="px-2.5 py-0.5 rounded-full bg-[#2E7D32] text-white font-bold text-xs uppercase tracking-wide flex items-center gap-1">
+                <span className="material-symbols-outlined text-[13px]">done_all</span>
+                Medicine Dispensed
+              </span>
+              <span className="text-[#1B5E20] font-semibold text-xs">
+                Slot {activeDispensedAlert.slot} → <strong className="font-mono text-[#2E7D32]">EMPTY</strong> (Marked Available)
+              </span>
+              {activeDispensedAlert.token && (
+                <span className="font-mono text-[11px] text-[#1B5E20]/80 bg-white/70 px-2 py-0.5 rounded-md border border-[#2E7D32]/30">
+                  Token: {activeDispensedAlert.token}
+                </span>
+              )}
+              <span className="text-[10px] text-[#2E7D32]/70 font-mono">
+                {activeDispensedAlert.timestamp}
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={dismissAlert}
+            className="text-[#2E7D32] hover:bg-[#C8E6C9] p-1 rounded-xl transition-colors cursor-pointer"
+            title="Dismiss notification"
+          >
+            <span className="material-symbols-outlined text-[18px]">close</span>
+          </button>
+        </div>
+      )}
 
       {actionSuccessMessage && (
         <div className="mt-4 p-3.5 bg-[#FAF7EE] border border-[#2F5D3F]/30 rounded-xl flex items-center justify-between text-[#2F5D3F] text-xs animate-fade-in shadow-xs">
@@ -1228,21 +1395,45 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
                       <span className="text-[10px] text-[#2F5D3F] font-bold">Issues Live One-Time Token</span>
                     </label>
                     <div className="grid grid-cols-3 gap-2">
-                      {[1, 2, 3].map((slotNum) => (
-                        <button
-                          key={slotNum}
-                          type="button"
-                          onClick={() => setSelectedSlot(slotNum as 1 | 2 | 3)}
-                          className={`py-2 px-3 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                            selectedSlot === slotNum
-                              ? 'bg-[#2F5D3F] text-white border-[#2F5D3F] shadow-xs'
-                              : 'bg-[#FAF7EE] text-[#1F2F4F] border-[#E5DFCE] hover:bg-white'
-                          }`}
-                        >
-                          <span className="material-symbols-outlined text-[15px]">view_carousel</span>
-                          <span>Slot 0{slotNum}</span>
-                        </button>
-                      ))}
+                      {[1, 2, 3].map((slotNum) => {
+                        const slotKey = slotNum as 1 | 2 | 3;
+                        const slotInfo = currentSlotStatuses[slotKey] || { status: 'EMPTY', isAvailable: true };
+                        const isSlotEmpty = slotInfo.status === 'EMPTY';
+                        const isJustDispensed = activeDispensedAlert?.slot === slotNum;
+
+                        return (
+                          <button
+                            key={slotNum}
+                            type="button"
+                            onClick={() => setSelectedSlot(slotKey)}
+                            className={`py-2 px-2.5 rounded-xl border text-xs font-semibold flex flex-col items-center justify-center gap-1 transition-all cursor-pointer ${
+                              selectedSlot === slotNum
+                                ? 'bg-[#2F5D3F] text-white border-[#2F5D3F] shadow-xs'
+                                : 'bg-[#FAF7EE] text-[#1F2F4F] border-[#E5DFCE] hover:bg-white'
+                            }`}
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <span className="material-symbols-outlined text-[15px]">view_carousel</span>
+                              <span>Slot 0{slotNum}</span>
+                            </div>
+                            <div className="flex items-center gap-1 text-[10px]">
+                              <span
+                                className={`w-1.5 h-1.5 rounded-full ${
+                                  isSlotEmpty ? 'bg-[#2E7D32]' : 'bg-[#D46B08]'
+                                }`}
+                              />
+                              <span className="font-mono">{isSlotEmpty ? 'EMPTY' : 'OCCUPIED'}</span>
+                              <span className="opacity-70 text-[9px]">• {isSlotEmpty ? 'Available' : 'Busy'}</span>
+                            </div>
+                            {isJustDispensed && (
+                              <span className="mt-0.5 px-2 py-0.5 rounded-md bg-[#2E7D32] text-white text-[9px] font-bold uppercase tracking-wider flex items-center gap-1 animate-pulse">
+                                <span className="material-symbols-outlined text-[11px]">done_all</span>
+                                Medicine Dispensed
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
 
@@ -1284,8 +1475,8 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
               );
             })()}
 
-            {/* Station Physical Dispensing Verification (Tray & Sensor) - Shown in Dispensing Mode or Full Mode */}
-            {(!isReviewMode || isDispensingMode) && (
+            {/* Station Physical Dispensing Verification (Tray & Sensor) - Shown in Full Mode */}
+            {!isReviewMode && (
               <div className="bg-white rounded-2xl p-5 border border-[#E5DFCE] shadow-xs space-y-4">
                 <div className="flex items-center justify-between pb-3 border-b border-[#E5DFCE]">
                   <div className="flex items-center gap-2">
@@ -1402,20 +1593,36 @@ export const DispensingBay: React.FC<DispensingBayProps> = ({
                     {/* Slot Picker */}
                     <div className="flex items-center gap-1.5 bg-[#FAF7EE] p-1 rounded-xl border border-[#E5DFCE]">
                       <span className="text-[10px] uppercase font-bold text-[#1F2F4F]/70 px-1">Slot:</span>
-                      {[1, 2, 3].map((slotNum) => (
-                        <button
-                          key={slotNum}
-                          type="button"
-                          onClick={() => setSelectedSlot(slotNum as 1 | 2 | 3)}
-                          className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                            selectedSlot === slotNum
-                              ? 'bg-[#2F5D3F] text-white shadow-xs'
-                              : 'text-[#1F2F4F] hover:bg-white'
-                          }`}
-                        >
-                          0{slotNum}
-                        </button>
-                      ))}
+                      {[1, 2, 3].map((slotNum) => {
+                        const slotKey = slotNum as 1 | 2 | 3;
+                        const slotInfo = currentSlotStatuses[slotKey] || { status: 'EMPTY', isAvailable: true };
+                        const isSlotEmpty = slotInfo.status === 'EMPTY';
+                        const isJustDispensed = activeDispensedAlert?.slot === slotNum;
+
+                        return (
+                          <button
+                            key={slotNum}
+                            type="button"
+                            onClick={() => setSelectedSlot(slotKey)}
+                            title={`Slot 0${slotNum}: ${isSlotEmpty ? 'EMPTY (Available)' : 'OCCUPIED'}${isJustDispensed ? ' - Medicine Dispensed' : ''}`}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1 ${
+                              selectedSlot === slotNum
+                                ? 'bg-[#2F5D3F] text-white shadow-xs'
+                                : 'text-[#1F2F4F] hover:bg-white'
+                            }`}
+                          >
+                            <span>0{slotNum}</span>
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                isSlotEmpty ? 'bg-[#2E7D32]' : 'bg-[#D46B08]'
+                              }`}
+                            />
+                            {isJustDispensed && (
+                              <span className="w-1.5 h-1.5 rounded-full bg-[#2E7D32] animate-ping" />
+                            )}
+                          </button>
+                        );
+                      })}
                     </div>
 
                     <button

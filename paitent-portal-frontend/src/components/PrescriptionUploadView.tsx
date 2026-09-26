@@ -174,6 +174,11 @@ export const PrescriptionUploadView: React.FC<PrescriptionUploadViewProps> = ({
 
       if (!res.success) {
         console.warn('[Database Notice]:', res.error);
+      } else if (res.prescriptionId) {
+        try {
+          sessionStorage.setItem('active_prescription_id', res.prescriptionId);
+          localStorage.setItem('active_prescription_id', res.prescriptionId);
+        } catch {}
       }
 
       if (onPrescriptionExtracted) {

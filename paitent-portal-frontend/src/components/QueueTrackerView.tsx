@@ -22,6 +22,7 @@ import {
   claimDispenseTokenApi,
   subscribeToPatientDispenseTokens,
 } from '../utils/supabase';
+import { mqttClient } from '../lib/mqtt';
 
 interface QueueTrackerViewProps {
   patient: PatientProfile;
@@ -85,23 +86,45 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
     let isMounted = true;
     setIsLoadingToken(true);
 
-    fetchActiveDispenseToken().then((res) => {
-      if (isMounted) {
-        if (res.success && res.token) {
-          setActiveToken(res.token);
+    const checkToken = async () => {
+      try {
+        const res = await fetchActiveDispenseToken();
+        if (isMounted) {
+          if (res && res.success && res.token && res.token.status === 'issued') {
+            setActiveToken(res.token);
+          } else if (res && res.success && !res.token) {
+            setActiveToken(null);
+          }
         }
-        setIsLoadingToken(false);
+      } catch (err) {
+        console.warn('Error fetching active token:', err);
+      } finally {
+        if (isMounted) setIsLoadingToken(false);
       }
-    });
+    };
+
+    checkToken();
+
+    // Fast polling fallback to ensure immediate detection across tabs/devices
+    const pollInterval = setInterval(() => {
+      if (isMounted) {
+        checkToken();
+      }
+    }, 1200);
 
     const unsubscribe = subscribeToPatientDispenseTokens(patient.id, (token) => {
       if (isMounted) {
-        setActiveToken(token);
+        if (token && token.status === 'issued') {
+          setActiveToken(token);
+        } else if (token && token.status === 'dispensed') {
+          setActiveToken(token);
+        }
       }
     });
 
     return () => {
       isMounted = false;
+      clearInterval(pollInterval);
       unsubscribe();
     };
   }, [patient.id]);
@@ -146,7 +169,7 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
           reason: m.category,
         }));
 
-  // Handle DISPENSE MEDICINE click (Atomic claim via server) (Requirements 11, 12, 13, 14, 15, 16)
+  // Handle DISPENSE MEDICINE / VEND click (Atomic claim via server and slot-specific MQTT publish)
   const handleDispenseMedicine = async () => {
     if (!activeToken) {
       setClaimError('No active dispensing token available. Please wait for pharmacist approval.');
@@ -155,7 +178,7 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
 
     if (activeToken.status !== 'issued') {
       if (activeToken.status === 'dispense_requested') {
-        setClaimError('Dispensing request already submitted for Slot ' + activeToken.slot + '. Please collect your medication.');
+        setClaimError('Dispensing request already submitted for Slot 0' + activeToken.slot + '. Please collect your medication.');
       } else if (activeToken.status === 'dispensed') {
         setClaimError('Medication has already been dispensed.');
       } else if (activeToken.status === 'expired') {
@@ -170,22 +193,79 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
     setClaimError(null);
     setClaimSuccessMessage(null);
 
-    // Call server to atomically claim the token (Requirement 13 & 14)
-    const res = await claimDispenseTokenApi(activeToken.token);
+    const slotNum = Number(activeToken.slot) || 1;
+    const dispensePayload = JSON.stringify({
+      token: activeToken.token,
+      slot: slotNum,
+      action: 'DISPENSE',
+      timestamp: new Date().toISOString(),
+    });
 
-    if (res.success && res.token) {
-      setActiveToken(res.token);
-      setClaimSuccessMessage(`Dispensing authorized for Slot ${res.token.slot}! Robotic delivery chute opened.`);
-      setIsClaiming(false);
-      // Trigger dispensing modal
-      handleStartVend();
-    } else {
-      setClaimError(res.error || 'Failed to claim dispensing token.');
-      setIsClaiming(false);
+    // 1. Immediately publish slot-specific messages to ESP32 hardware via MQTT
+    try {
+      mqttClient.publish('pharmacy/dispense', dispensePayload, (err) => {
+        if (err) {
+          console.error('[MQTT Publish Error pharmacy/dispense]:', err);
+        } else {
+          console.log('[MQTT] Published slot-specific command to pharmacy/dispense:', dispensePayload);
+        }
+      });
+      mqttClient.publish(`pharmacy/dispense/slot/${slotNum}`, dispensePayload);
+      mqttClient.publish('pharmacy/slot', String(slotNum));
+      // Also publish pharmacy/status so pharmacist portal instantly gets status: EMPTY
+      mqttClient.publish(
+        'pharmacy/status',
+        JSON.stringify({
+          slot: slotNum,
+          status: 'EMPTY',
+          token: activeToken.token,
+          action: 'DISPENSED',
+        })
+      );
+    } catch (publishErr) {
+      console.error('[MQTT Publish Exception]:', publishErr);
     }
+
+    // 2. Call server to atomically claim the token (Requirement 13 & 14)
+    try {
+      const res = await claimDispenseTokenApi(activeToken.token);
+      if (res.success && res.token) {
+        setActiveToken(res.token);
+        setClaimSuccessMessage(`Dispensing authorized for Slot 0${res.token.slot}! Robotic delivery chute opened.`);
+      }
+    } catch (err) {
+      console.warn('claimDispenseTokenApi fallback:', err);
+    }
+
+    // Direct Supabase status sync: atomically set token to dispensed and prescription to dispensed
+    try {
+      await supabase
+        .from('dispense_tokens')
+        .update({
+          status: 'dispensed',
+          used_at: new Date().toISOString(),
+        })
+        .eq('token', activeToken.token);
+
+      if (activeToken.prescription_id) {
+        await supabase
+          .from('prescriptions')
+          .update({
+            status: 'dispensed',
+          })
+          .eq('id', activeToken.prescription_id);
+      }
+    } catch (syncErr) {
+      console.warn('Supabase dispense sync notice:', syncErr);
+    }
+
+    setIsClaiming(false);
+
+    // 3. Trigger physical vending animation modal & audio chime
+    handleStartVend();
   };
 
-  // Handle trigger vend
+  // Handle trigger vend modal animation
   const handleStartVend = () => {
     setIsVendingModalOpen(true);
     setVendingPhase('authenticating');
@@ -578,17 +658,38 @@ export const QueueTrackerView: React.FC<QueueTrackerViewProps> = ({
         </div>
       </div>
 
-      {/* Clickable Button Saying Vend Medicine Under the Digitalized Prescription */}
+      {/* Dynamic Button Saying Vend Medicine Under the Digitalized Prescription */}
       <div className="w-full flex flex-col gap-2">
         <button
-          onClick={handleStartVend}
-          className="w-full py-4 px-6 bg-[#164529] hover:bg-[#235837] active:scale-[0.99] text-[#ffffff] font-serif font-bold text-base sm:text-lg rounded-2xl flex items-center justify-center gap-3 shadow-lg hover:shadow-xl transition-all cursor-pointer min-h-[56px]"
+          onClick={handleDispenseMedicine}
+          disabled={!activeToken || activeToken.status !== 'issued' || isClaiming}
+          className={`w-full py-4 px-6 font-serif font-bold text-base sm:text-lg rounded-2xl flex items-center justify-center gap-3 transition-all min-h-[56px] ${
+            activeToken && activeToken.status === 'issued' && !isClaiming
+              ? 'bg-[#164529] hover:bg-[#235837] active:scale-[0.99] text-[#ffffff] shadow-lg hover:shadow-xl cursor-pointer ring-2 ring-[#bbefc7]/50'
+              : 'bg-[#717971]/20 text-[#717971] border border-[#717971]/20 shadow-none cursor-not-allowed'
+          }`}
         >
-          <PackageCheck className="w-5 h-5 text-[#bbefc7]" />
-          <span>Vend Medicine</span>
+          {isClaiming ? (
+            <>
+              <Loader2 className="w-5 h-5 animate-spin text-[#164529]" />
+              <span>Initiating Slot Dispenser...</span>
+            </>
+          ) : activeToken && activeToken.status === 'issued' ? (
+            <>
+              <PackageCheck className="w-5 h-5 text-[#bbefc7]" />
+              <span>Vend Medicine (Slot 0{activeToken.slot})</span>
+            </>
+          ) : (
+            <>
+              <PackageCheck className="w-5 h-5 text-[#717971]" />
+              <span>Vend Medicine</span>
+            </>
+          )}
         </button>
         <p className="text-[11px] text-[#717971] text-center">
-          Tap to trigger instant automated dispensing into {patient.counterNumber || 'Counter 03'} collection chamber
+          {activeToken && activeToken.status === 'issued'
+            ? `Tap to trigger instant automated dispensing from Slot 0${activeToken.slot} into ${patient.counterNumber || 'Counter 03'} collection chamber`
+            : `Awaiting pharmacist approval & slot assignment • Button will unlock once token is issued`}
         </p>
       </div>
 

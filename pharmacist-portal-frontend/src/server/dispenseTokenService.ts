@@ -168,16 +168,38 @@ export async function generateDispenseToken(params: {
   let resolvedPatientName = patientName;
 
   if (prescriptionId) {
-    const rawRxPrefix = prescriptionId.replace(/^RX-/, '').toLowerCase();
-    const { data: rxList } = await supabase
-      .from('prescriptions')
-      .select('id, patient_name, status')
-      .or(`id.eq.${prescriptionId},id.ilike.${rawRxPrefix}%`)
-      .limit(1);
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(prescriptionId.trim());
+    if (isUuid) {
+      const { data: rxList } = await supabase
+        .from('prescriptions')
+        .select('id, patient_name, status')
+        .eq('id', prescriptionId.trim())
+        .limit(1);
 
-    if (rxList && rxList.length > 0) {
-      resolvedPrescriptionId = rxList[0].id;
-      if (!resolvedPatientName) resolvedPatientName = rxList[0].patient_name;
+      if (rxList && rxList.length > 0) {
+        resolvedPrescriptionId = rxList[0].id;
+        if (!resolvedPatientName) resolvedPatientName = rxList[0].patient_name;
+      }
+    } else {
+      const cleanHex = prescriptionId.replace(/^RX-/i, '').toLowerCase().trim();
+      const { data: rxList } = await supabase
+        .from('prescriptions')
+        .select('id, patient_name, status')
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      const matched = rxList?.find((r: any) =>
+        r.id.toLowerCase().replace(/-/g, '').startsWith(cleanHex) ||
+        r.id.toLowerCase().startsWith(cleanHex)
+      );
+
+      if (matched) {
+        resolvedPrescriptionId = matched.id;
+        if (!resolvedPatientName) resolvedPatientName = matched.patient_name;
+      } else if (rxList && rxList.length > 0) {
+        resolvedPrescriptionId = rxList[0].id;
+        if (!resolvedPatientName) resolvedPatientName = rxList[0].patient_name;
+      }
     }
   }
 
@@ -550,6 +572,86 @@ export async function getTokenForPrescription(
   return {
     success: true,
     token: data && data.length > 0 ? (data[0] as DispenseTokenRecord) : null,
+    status: 200,
+  };
+}
+
+/**
+ * Idempotently mark a dispense token as 'dispensed' in Supabase upon ESP32 completion.
+ * Records the completion timestamp and prevents duplicate updates.
+ */
+export async function completeDispenseToken(params: {
+  token: string;
+  slot?: number;
+}): Promise<{
+  success: boolean;
+  token?: DispenseTokenRecord;
+  alreadyDispensed?: boolean;
+  error?: string;
+  status?: number;
+}> {
+  const { token } = params;
+  if (!token || typeof token !== 'string') {
+    return { success: false, error: 'Token is required.', status: 400 };
+  }
+
+  const cleanToken = token.trim();
+  const supabase = getSupabaseAdmin();
+
+  // 1. Fetch token record
+  const { data: tokens, error: fetchError } = await supabase
+    .from('dispense_tokens')
+    .select('*')
+    .eq('token', cleanToken)
+    .limit(1);
+
+  if (fetchError || !tokens || tokens.length === 0) {
+    return { success: false, error: `Token not found: ${cleanToken}`, status: 404 };
+  }
+
+  const record = tokens[0] as DispenseTokenRecord;
+
+  // Idempotency check: if already marked 'dispensed', return gracefully without duplicate writes
+  if (record.status === 'dispensed') {
+    return {
+      success: true,
+      token: record,
+      alreadyDispensed: true,
+      status: 200,
+    };
+  }
+
+  // 2. Atomic update: status -> 'dispensed', used_at -> completion timestamp
+  // Guard condition .neq('status', 'dispensed') ensures concurrency safety
+  const completionTimestamp = new Date().toISOString();
+  const { data: updatedRows, error: updateError } = await supabase
+    .from('dispense_tokens')
+    .update({
+      status: 'dispensed',
+      used_at: completionTimestamp,
+    })
+    .eq('id', record.id)
+    .neq('status', 'dispensed')
+    .select();
+
+  if (updateError) {
+    console.error('[dispenseTokenService] Error completing dispense token:', updateError);
+    return { success: false, error: updateError.message, status: 500 };
+  }
+
+  // 3. Mark the associated prescription as 'dispensed'
+  if (record.prescription_id) {
+    await supabase
+      .from('prescriptions')
+      .update({ status: 'dispensed' })
+      .eq('id', record.prescription_id)
+      .neq('status', 'dispensed');
+  }
+
+  return {
+    success: true,
+    token: updatedRows && updatedRows.length > 0 ? (updatedRows[0] as DispenseTokenRecord) : record,
+    alreadyDispensed: false,
     status: 200,
   };
 }

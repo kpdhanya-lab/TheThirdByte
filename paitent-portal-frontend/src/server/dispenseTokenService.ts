@@ -175,16 +175,38 @@ export async function generateDispenseToken(params: {
   let resolvedPatientName = patientName;
 
   if (prescriptionId) {
-    const rawRxPrefix = prescriptionId.replace(/^RX-/, '').toLowerCase();
-    const { data: rxList } = await supabase
-      .from('prescriptions')
-      .select('id, patient_name, status')
-      .or(`id.eq.${prescriptionId},id.ilike.${rawRxPrefix}%`)
-      .limit(1);
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(prescriptionId.trim());
+    if (isUuid) {
+      const { data: rxList } = await supabase
+        .from('prescriptions')
+        .select('id, patient_name, status')
+        .eq('id', prescriptionId.trim())
+        .limit(1);
 
-    if (rxList && rxList.length > 0) {
-      resolvedPrescriptionId = rxList[0].id;
-      if (!resolvedPatientName) resolvedPatientName = rxList[0].patient_name;
+      if (rxList && rxList.length > 0) {
+        resolvedPrescriptionId = rxList[0].id;
+        if (!resolvedPatientName) resolvedPatientName = rxList[0].patient_name;
+      }
+    } else {
+      const cleanHex = prescriptionId.replace(/^RX-/i, '').toLowerCase().trim();
+      const { data: rxList } = await supabase
+        .from('prescriptions')
+        .select('id, patient_name, status')
+        .order('created_at', { ascending: false })
+        .limit(50);
+
+      const matched = rxList?.find((r: any) =>
+        r.id.toLowerCase().replace(/-/g, '').startsWith(cleanHex) ||
+        r.id.toLowerCase().startsWith(cleanHex)
+      );
+
+      if (matched) {
+        resolvedPrescriptionId = matched.id;
+        if (!resolvedPatientName) resolvedPatientName = matched.patient_name;
+      } else if (rxList && rxList.length > 0) {
+        resolvedPrescriptionId = rxList[0].id;
+        if (!resolvedPatientName) resolvedPatientName = rxList[0].patient_name;
+      }
     }
   }
 
