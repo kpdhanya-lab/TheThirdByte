@@ -98,24 +98,24 @@ export function saveGroqApiKeyToServer(apiKey: string): { success: boolean; mess
  */
 export function formatGroqError(err: any): string {
   const status = err?.status || err?.statusCode;
-  const msg = err?.message || String(err);
+  const rawMsg = err?.error?.message || err?.message || String(err);
 
-  if (status === 401 || msg.includes('401') || msg.includes('Invalid API Key') || msg.includes('invalid_api_key')) {
+  if (status === 401 || rawMsg.includes('401') || rawMsg.includes('Invalid API Key') || rawMsg.includes('invalid_api_key')) {
     return 'Invalid Groq API Key (401). Please verify your Groq key at https://console.groq.com/keys (should start with gsk_) and update it in the settings drawer.';
   }
-  if (status === 403 || msg.includes('403') || msg.includes('permission_denied')) {
+  if (status === 403 || rawMsg.includes('403') || rawMsg.includes('permission_denied')) {
     return 'Groq Access Denied (403). Your account/project lacks permissions for this model or vision endpoint.';
   }
-  if (status === 429 || msg.includes('429') || msg.includes('rate_limit') || msg.includes('Rate limit')) {
-    return 'Groq Rate Limit Exceeded (429). The request frequency limit was reached. Please wait a moment and try again.';
+  if (status === 429 || rawMsg.includes('429') || rawMsg.includes('rate_limit') || rawMsg.includes('Rate limit')) {
+    return `Groq Rate Limit Exceeded (429): ${rawMsg}`;
   }
-  if (status === 404 || msg.includes('404') || msg.includes('model_not_found')) {
+  if (status === 404 || rawMsg.includes('404') || rawMsg.includes('model_not_found')) {
     return `Groq model not found or currently unavailable (${GROQ_VISION_MODEL}).`;
   }
-  if (msg.includes('Gemini') || msg.includes('PERMISSION_DENIED')) {
-    return `Gemini fallback diagnostic: ${msg}`;
+  if (rawMsg.includes('Gemini') || rawMsg.includes('PERMISSION_DENIED')) {
+    return `Gemini fallback diagnostic: ${rawMsg}`;
   }
-  return `Groq API Error: ${msg}`;
+  return `Groq API Error: ${rawMsg}`;
 }
 
 /**
@@ -185,8 +185,14 @@ export async function extractPrescriptionWithGroq(
       lastError = schemaErr;
       console.warn(`[Groq API] Model ${model} json_schema attempt note:`, schemaErr?.message || schemaErr);
 
-      // If 401 auth error, fail immediately rather than retrying different models
-      if (schemaErr?.status === 401 || schemaErr?.message?.includes('401')) {
+      // If 401 auth or 429 rate limit error, fail immediately rather than retrying
+      if (
+        schemaErr?.status === 401 ||
+        schemaErr?.status === 429 ||
+        schemaErr?.message?.includes('401') ||
+        schemaErr?.message?.includes('429') ||
+        schemaErr?.message?.includes('rate_limit')
+      ) {
         throw new Error(formatGroqError(schemaErr));
       }
 

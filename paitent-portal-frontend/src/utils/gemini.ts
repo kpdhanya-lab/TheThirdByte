@@ -5,9 +5,62 @@ import {
 } from '../types/prescriptionExtraction';
 
 /**
- * Convert a File object to base64 data string and detect mimeType
+ * Downscale and compress high-resolution images to fit comfortably within Groq vision token limits
+ */
+async function optimizeImageForExtraction(
+  file: File,
+  maxDimension: number = 1600,
+  quality: number = 0.85
+): Promise<{ base64Data: string; mimeType: string }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if (width > maxDimension || height > maxDimension) {
+        if (width > height) {
+          height = Math.round((height * maxDimension) / width);
+          width = maxDimension;
+        } else {
+          width = Math.round((width * maxDimension) / height);
+          height = maxDimension;
+        }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('Canvas context unavailable'));
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL('image/jpeg', quality);
+      const [, base64Data] = dataUrl.split(',', 2);
+      resolve({ base64Data, mimeType: 'image/jpeg' });
+    };
+    img.onerror = (err) => {
+      URL.revokeObjectURL(url);
+      reject(err);
+    };
+    img.src = url;
+  });
+}
+
+/**
+ * Convert a File object to base64 data string and detect mimeType.
+ * Optimizes image files to preserve Groq API rate limits.
  */
 export async function fileToBase64(file: File): Promise<{ base64Data: string; mimeType: string }> {
+  if (file.type.startsWith('image/')) {
+    try {
+      return await optimizeImageForExtraction(file);
+    } catch {
+      // Fall back to direct file reading if canvas processing encounters an issue
+    }
+  }
+
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
